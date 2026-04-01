@@ -1,0 +1,17 @@
+name = "cloudflare-webmail"
+main = "src/index.ts"
+compatibility_date = "2025-10-11"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "webmail-db"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+[vars]
+FROM_DOMAIN = "mail.yourdomain.com"
+OCI_SMTP_HOST = "smtp.email.us-ashburn-1.oci.oraclecloud.com"
+OCI_SMTP_PORT = "587"
