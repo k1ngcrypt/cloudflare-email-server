@@ -4,6 +4,22 @@ import type { Env } from './index';
 const MAX_INBOUND_ATTACHMENT_COUNT = 25;
 const MAX_INBOUND_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
+function toAttachmentBytes(content: unknown): Uint8Array | null {
+  if (content instanceof Uint8Array) {
+    return content;
+  }
+
+  if (content instanceof ArrayBuffer) {
+    return new Uint8Array(content);
+  }
+
+  if (ArrayBuffer.isView(content)) {
+    return new Uint8Array(content.buffer, content.byteOffset, content.byteLength);
+  }
+
+  return null;
+}
+
 function sanitizeFilename(filename: string): string {
   const trimmed = filename.trim();
   const safe = trimmed.replace(/[\\/:*?"<>|\u0000-\u001F]+/g, '_').replace(/\s+/g, ' ');
@@ -43,6 +59,10 @@ export async function handleIncomingEmail(
     const subject = parsed.subject ?? '(no subject)';
     const msgId = parsed.messageId ?? null;
     const attachments = Array.isArray(parsed.attachments) ? parsed.attachments : [];
+    const normalizedAttachments: Array<{
+      attachment: (typeof attachments)[number];
+      bytes: Uint8Array;
+    }> = [];
 
     if (attachments.length > MAX_INBOUND_ATTACHMENT_COUNT) {
       message.setReject(`Too many attachments (max ${MAX_INBOUND_ATTACHMENT_COUNT})`);
@@ -51,15 +71,18 @@ export async function handleIncomingEmail(
 
     let totalAttachmentBytes = 0;
     for (const attachment of attachments) {
-      if (!(attachment.content instanceof Uint8Array)) {
+      const bytes = toAttachmentBytes(attachment.content);
+      if (!bytes) {
         throw new Error('Attachment payload is invalid');
       }
 
-      totalAttachmentBytes += attachment.content.byteLength;
+      totalAttachmentBytes += bytes.byteLength;
       if (totalAttachmentBytes > MAX_INBOUND_TOTAL_ATTACHMENT_BYTES) {
         message.setReject(`Total attachment size exceeds ${MAX_INBOUND_TOTAL_ATTACHMENT_BYTES} bytes`);
         return;
       }
+
+      normalizedAttachments.push({ attachment, bytes });
     }
 
     const insertedEmail = await env.DB.prepare(
@@ -90,12 +113,8 @@ export async function handleIncomingEmail(
 
     emailId = insertedEmail.id;
 
-    for (let i = 0; i < attachments.length; i += 1) {
-      const attachment = attachments[i];
-
-      if (!(attachment.content instanceof Uint8Array)) {
-        throw new Error(`Attachment ${i + 1} has invalid content`);
-      }
+    for (let i = 0; i < normalizedAttachments.length; i += 1) {
+      const { attachment, bytes: content } = normalizedAttachments[i];
 
       const originalFilename =
         typeof attachment.filename === 'string' && attachment.filename.trim().length > 0
@@ -106,7 +125,6 @@ export async function handleIncomingEmail(
         typeof attachment.mimeType === 'string' && attachment.mimeType.trim().length > 0
           ? attachment.mimeType
           : 'application/octet-stream';
-      const content = attachment.content;
       const storageKey = buildStorageKey(user.id, emailId, filename);
 
       await env.ATTACHMENTS.put(storageKey, content, {
@@ -135,8 +153,10 @@ export async function handleIncomingEmail(
         .run();
     }
 
-    if (attachments.length > 0) {
-      console.log(`Email ${msgId ?? '(no-message-id)'} stored ${attachments.length} attachment(s)`);
+    if (normalizedAttachments.length > 0) {
+      console.log(
+        `Email ${msgId ?? '(no-message-id)'} stored ${normalizedAttachments.length} attachment(s)`
+      );
     }
   } catch (err) {
     console.error('Inbound email processing failed:', err);

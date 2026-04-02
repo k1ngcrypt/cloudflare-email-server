@@ -7,6 +7,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:create": "wrangler d1 create webmail-db",
     "db:migrate": "wrangler d1 execute webmail-db --file=./schema.sql"
   },
@@ -17,8 +19,10 @@
     "worker-mailer": "^1.2.1"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.14.1",
     "@cloudflare/workers-types": "^4.20260307.0",
     "typescript": "^5.8.3",
+    "vitest": "^4.1.2",
     "wrangler": "^3.114.10"
   }
 }

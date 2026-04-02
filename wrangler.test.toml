@@ -1,0 +1,23 @@
+name = "cloudflare-webmail-test"
+main = "src/index.ts"
+compatibility_date = "2025-10-11"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "webmail-db-test"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "webmail-attachments-test"
+preview_bucket_name = "webmail-attachments-test"
+
+[vars]
+FROM_DOMAIN = "mail.example.test"
+APP_ORIGIN = "https://webmail.test"
+OCI_SMTP_HOST = "smtp.invalid"
+OCI_SMTP_PORT = "587"
+OCI_SMTP_USER = "test-user"
+OCI_SMTP_PASS = "test-pass"
+AUTH_SECRET = "test-auth-secret"
