@@ -324,6 +324,11 @@ describe('worker HTTP API integration', () => {
     });
     expect(invalidIdResponse.status).toBe(400);
 
+    const mixedIdResponse = await apiRequest(`/api/emails/${ownerEmail?.id}abc`, {
+      headers: authHeader,
+    });
+    expect(mixedIdResponse.status).toBe(400);
+
     const deleteResponse = await apiRequest(`/api/emails/${ownerEmail?.id}`, {
       method: 'DELETE',
       headers: authHeader,
@@ -396,6 +401,11 @@ describe('worker HTTP API integration', () => {
       headers: authHeader,
     });
     expect(sentDetailResponse.status).toBe(200);
+
+    const mixedSentIdResponse = await apiRequest(`/api/sent/${sentRow?.id}abc`, {
+      headers: authHeader,
+    });
+    expect(mixedSentIdResponse.status).toBe(400);
 
     const sentDetail = await readJson<{
       id: number;

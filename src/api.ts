@@ -46,6 +46,8 @@ interface PreparedSendAttachment extends SendAttachment {
   bytes: Uint8Array;
 }
 
+type AttachmentOwnerColumn = 'email_id' | 'sent_email_id';
+
 type AuthenticatedUser = {
   id: number;
   email: string;
@@ -95,9 +97,31 @@ function resolveAllowedOrigin(request: Request, env: Env): string | null {
   return null;
 }
 
+function parseInteger(value: string | null | undefined): number | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function parseNumericId(value: string): number | null {
-  const id = Number.parseInt(value, 10);
-  return Number.isNaN(id) ? null : id;
+  const parsed = parseInteger(value);
+  if (parsed === null || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
 }
 
 function buildSentAttachmentStorageKey(userId: number, sentEmailId: number, filename: string): string {
@@ -105,12 +129,12 @@ function buildSentAttachmentStorageKey(userId: number, sentEmailId: number, file
 }
 
 function parsePaginationParams(c: Context<AppBindings>): { safeLimit: number; safeOffset: number } {
-  const limit = Number.parseInt(c.req.query('limit') ?? '50', 10);
-  const offset = Number.parseInt(c.req.query('offset') ?? '0', 10);
+  const limit = parseInteger(c.req.query('limit'));
+  const offset = parseInteger(c.req.query('offset'));
 
   return {
-    safeLimit: Number.isNaN(limit) ? 50 : Math.min(Math.max(limit, 1), 200),
-    safeOffset: Number.isNaN(offset) ? 0 : Math.max(offset, 0),
+    safeLimit: limit === null ? 50 : Math.min(Math.max(limit, 1), 200),
+    safeOffset: offset === null ? 0 : Math.max(offset, 0),
   };
 }
 
@@ -124,6 +148,36 @@ function requiredPayloadErrorForPath(path: string): string {
   }
 
   return 'Invalid JSON payload';
+}
+
+async function failedLoginResponse(c: Context<AppBindings>, throttleKey: string): Promise<Response> {
+  const loginState = await recordFailedLoginAttempt(c.env, throttleKey);
+  if (loginState.blocked) {
+    c.header('Retry-After', String(loginState.retryAfterSeconds));
+    return c.json({ error: 'Too many login attempts. Try again later.' }, 429);
+  }
+
+  return c.json({ error: 'Invalid credentials' }, 401);
+}
+
+async function listAttachmentsByOwner(
+  c: Context<AppBindings>,
+  userId: number,
+  ownerColumn: AttachmentOwnerColumn,
+  ownerId: number
+): Promise<AttachmentSummary[]> {
+  const rows = await c.env.DB.prepare(
+    `
+      SELECT id, filename, mime_type, size_bytes, content_id, disposition, created_at
+      FROM attachments
+      WHERE user_id = ? AND ${ownerColumn} = ?
+      ORDER BY id ASC
+    `
+  )
+    .bind(userId, ownerId)
+    .all();
+
+  return (rows.results ?? []) as unknown as AttachmentSummary[];
 }
 
 const app = new Hono<AppBindings>();
@@ -219,24 +273,12 @@ api.post(
     .first<{ id: number; email: string; password_hash: string }>();
 
   if (!user) {
-    const loginState = await recordFailedLoginAttempt(c.env, throttleKey);
-    if (loginState.blocked) {
-      c.header('Retry-After', String(loginState.retryAfterSeconds));
-      return c.json({ error: 'Too many login attempts. Try again later.' }, 429);
-    }
-
-    return c.json({ error: 'Invalid credentials' }, 401);
+    return failedLoginResponse(c, throttleKey);
   }
 
   const passwordOk = await verifyPasswordAndUpgrade(c.env, user.id, body.password, user.password_hash);
   if (!passwordOk) {
-    const loginState = await recordFailedLoginAttempt(c.env, throttleKey);
-    if (loginState.blocked) {
-      c.header('Retry-After', String(loginState.retryAfterSeconds));
-      return c.json({ error: 'Too many login attempts. Try again later.' }, 429);
-    }
-
-    return c.json({ error: 'Invalid credentials' }, 401);
+    return failedLoginResponse(c, throttleKey);
   }
 
   await clearLoginAttempts(c.env, throttleKey);
@@ -382,18 +424,7 @@ api.get('/sent/:id', async (c) => {
     return c.json({ error: 'Not found' }, 404);
   }
 
-  const attachmentRows = await c.env.DB.prepare(
-    `
-      SELECT id, filename, mime_type, size_bytes, content_id, disposition, created_at
-      FROM attachments
-      WHERE user_id = ? AND sent_email_id = ?
-      ORDER BY id ASC
-    `
-  )
-    .bind(user.id, sentId)
-    .all();
-
-  const attachments = (attachmentRows.results ?? []) as unknown as AttachmentSummary[];
+  const attachments = await listAttachmentsByOwner(c, user.id, 'sent_email_id', sentId);
 
   return c.json({
     ...(sent as Record<string, unknown>),
@@ -420,18 +451,7 @@ api.get('/emails/:id', async (c) => {
     .bind(emailId, user.id)
     .run();
 
-  const attachmentRows = await c.env.DB.prepare(
-    `
-      SELECT id, filename, mime_type, size_bytes, content_id, disposition, created_at
-      FROM attachments
-      WHERE user_id = ? AND email_id = ?
-      ORDER BY id ASC
-    `
-  )
-    .bind(user.id, emailId)
-    .all();
-
-  const attachments = (attachmentRows.results ?? []) as unknown as AttachmentSummary[];
+  const attachments = await listAttachmentsByOwner(c, user.id, 'email_id', emailId);
 
   return c.json({
     ...(email as Record<string, unknown>),
