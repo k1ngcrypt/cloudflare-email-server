@@ -11,6 +11,7 @@
     "db:migrate": "wrangler d1 execute webmail-db --file=./schema.sql"
   },
   "dependencies": {
+    "@noble/hashes": "^2.0.1",
     "mimetext": "^3.0.23",
     "postal-mime": "^2.4.4",
     "worker-mailer": "^1.2.1"

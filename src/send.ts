@@ -29,12 +29,19 @@ export async function sendEmail(env: Env, opts: SendOptions): Promise<void> {
     authType: 'plain',
   } as never);
 
-  await mailer.send({
-    from: { name: 'Webmail', email: opts.from },
-    to: { email: opts.to },
-    subject: opts.subject,
-    text: opts.text,
-    ...(opts.html ? { html: opts.html } : {}),
-    ...(opts.attachments?.length ? { attachments: opts.attachments } : {}),
-  });
+  try {
+    await mailer.send({
+      from: { name: 'Webmail', email: opts.from },
+      to: { email: opts.to },
+      subject: opts.subject,
+      text: opts.text,
+      ...(opts.html ? { html: opts.html } : {}),
+      ...(opts.attachments?.length ? { attachments: opts.attachments } : {}),
+    });
+  } finally {
+    const close = (mailer as { close?: () => Promise<void> | void }).close;
+    if (typeof close === 'function') {
+      await close.call(mailer);
+    }
+  }
 }

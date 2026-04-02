@@ -53,15 +53,25 @@ CREATE TABLE IF NOT EXISTS attachments (
 
 -- Session tokens
 CREATE TABLE IF NOT EXISTS sessions (
-  token         TEXT PRIMARY KEY,
+  token         TEXT PRIMARY KEY, -- stores HMAC-SHA256(session_token, AUTH_SECRET)
   user_id       INTEGER NOT NULL REFERENCES users(id),
   expires_at    TEXT NOT NULL
+);
+
+-- Login attempt throttling (per client IP + username key)
+CREATE TABLE IF NOT EXISTS login_attempts (
+  throttle_key      TEXT PRIMARY KEY,
+  attempt_count     INTEGER NOT NULL DEFAULT 0,
+  window_started_at TEXT NOT NULL,
+  blocked_until     TEXT,
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_emails_user_folder ON emails(user_id, folder);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_blocked ON login_attempts(blocked_until);
 CREATE INDEX IF NOT EXISTS idx_sent_user_time ON sent_emails(user_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_sent ON attachments(sent_email_id);

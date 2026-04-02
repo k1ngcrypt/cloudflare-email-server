@@ -5,6 +5,7 @@ export interface Env {
   DB: D1Database;
   ATTACHMENTS: R2Bucket;
   FROM_DOMAIN: string;
+  APP_ORIGIN?: string;
   OCI_SMTP_HOST: string;
   OCI_SMTP_PORT: string;
   OCI_SMTP_USER: string;

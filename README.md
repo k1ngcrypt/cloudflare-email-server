@@ -16,7 +16,15 @@ Cloudflare Worker webmail server:
    - `OCI_SMTP_USER`
    - `OCI_SMTP_PASS`
    - `AUTH_SECRET`
-6. Configure `.dev.vars` for local development (see `.dev.vars.example`).
+6. Optional: set `APP_ORIGIN` in Wrangler vars if the UI is served from a different trusted origin.
+7. Configure `.dev.vars` for local development (see `.dev.vars.example`).
+
+## Security Notes
+
+- Passwords are stored using `argon2id` hashes (legacy SHA-256 hashes are upgraded automatically on successful login).
+- API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.
+- Login attempts are throttled per `client-ip + username` key (`login_attempts` table in `schema.sql`).
+- If this project was already deployed before this update, re-run `npm run db:migrate` to create the new table/indexes.
 
 ## Commands
 

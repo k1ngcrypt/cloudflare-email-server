@@ -106,7 +106,7 @@ export function getWebmailHtml(): string {
 </div>
 
 <script>
-  let TOKEN = localStorage.getItem('webmail_token') || '';
+  let TOKEN = '';
   let currentFolder = 'inbox';
 
   function addSubjectPrefix(subject, prefix) {
@@ -129,24 +129,29 @@ export function getWebmailHtml(): string {
   async function doLogin() {
     const user = document.getElementById('loginUser').value;
     const pass = document.getElementById('loginPass').value;
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: user, password: pass }),
-    });
+    const res = await apiFetch('/api/login', 'POST', { username: user, password: pass });
     const data = await res.json();
     if (!res.ok) {
       document.getElementById('loginError').textContent = data.error || 'Login failed';
       return;
     }
-    TOKEN = data.token;
-    localStorage.setItem('webmail_token', TOKEN);
+    TOKEN = String(data.token || '');
+    document.getElementById('loginError').textContent = '';
     showApp();
   }
 
-  function logout() {
+  async function logout() {
+    try {
+      await apiFetch('/api/logout', 'POST');
+    } catch {
+      // Ignore network errors and force client-side sign-out state.
+    }
+
     TOKEN = '';
-    localStorage.removeItem('webmail_token');
+    showLogin();
+  }
+
+  function showLogin() {
     document.getElementById('login').style.display = 'flex';
     document.getElementById('app').style.display = 'none';
   }
@@ -157,9 +162,17 @@ export function getWebmailHtml(): string {
     loadFolder('inbox');
   }
 
-  if (TOKEN) {
-    showApp();
+  async function bootstrapSession() {
+    const res = await apiFetch('/api/me');
+    if (res.ok) {
+      showApp();
+      return;
+    }
+
+    showLogin();
   }
+
+  bootstrapSession();
 
   async function loadFolder(folder, btn) {
     currentFolder = folder;
@@ -211,7 +224,22 @@ export function getWebmailHtml(): string {
 
       const sent = await res.json();
       const sentDate = sent.sent_at ? new Date(sent.sent_at).toLocaleString() : '(unknown)';
-      document.getElementById('viewer').innerHTML = '\n        <div class="viewer-header">\n          <div class="viewer-subject">' + esc(sent.subject || '(no subject)') + '</div>\n          <div class="viewer-meta">\n            To: ' + esc(sent.to_address || '') + '<br>\n            Date: ' + esc(sentDate) + '\n          </div>\n          <div style="margin-top:8px;display:flex;gap:8px;">\n            <button class="btn btn-primary" onclick="replyTo(' + JSON.stringify(sent.to_address || '') + ', ' + JSON.stringify(sent.subject || '') + ', ' + JSON.stringify(sent.body_text || '') + ', ' + JSON.stringify(sent.sent_at || '') + ')">Reply</button>\n            <button class="btn btn-primary" onclick="forwardEmail(' + JSON.stringify(sent.subject || '') + ', ' + JSON.stringify(sent.body_text || '') + ', ' + JSON.stringify(sent.sent_at || '') + ', ' + JSON.stringify(sent.to_address || '') + ')">Forward</button>\n          </div>\n        </div>\n        <div class="viewer-body">' + renderBody(sent) + '</div>\n        ' + renderAttachments(sent.attachments || []) + '\n      ';
+      document.getElementById('viewer').innerHTML = '\n        <div class="viewer-header">\n          <div class="viewer-subject">' + esc(sent.subject || '(no subject)') + '</div>\n          <div class="viewer-meta">\n            To: ' + esc(sent.to_address || '') + '<br>\n            Date: ' + esc(sentDate) + '\n          </div>\n          <div style="margin-top:8px;display:flex;gap:8px;">\n            <button class="btn btn-primary" id="replySentBtn">Reply</button>\n            <button class="btn btn-primary" id="forwardSentBtn">Forward</button>\n          </div>\n        </div>\n        <div class="viewer-body">' + renderBody(sent) + '</div>\n        ' + renderAttachments(sent.attachments || []) + '\n      ';
+
+      const replySentBtn = document.getElementById('replySentBtn');
+      if (replySentBtn) {
+        replySentBtn.addEventListener('click', () => {
+          replyTo(sent.to_address || '', sent.subject || '', sent.body_text || '', sent.sent_at || '');
+        });
+      }
+
+      const forwardSentBtn = document.getElementById('forwardSentBtn');
+      if (forwardSentBtn) {
+        forwardSentBtn.addEventListener('click', () => {
+          forwardEmail(sent.subject || '', sent.body_text || '', sent.sent_at || '', sent.to_address || '');
+        });
+      }
+
       return;
     }
 
@@ -224,7 +252,28 @@ export function getWebmailHtml(): string {
     const email = await res.json();
     const safeFrom = esc(email.from_name ? (email.from_name + ' <' + email.from_address + '>') : email.from_address);
 
-    document.getElementById('viewer').innerHTML = '\n      <div class="viewer-header">\n        <div class="viewer-subject">' + esc(email.subject || '(no subject)') + '</div>\n        <div class="viewer-meta">\n          From: ' + safeFrom + '<br>\n          To: ' + esc(email.to_address) + '<br>\n          Date: ' + new Date(email.received_at).toLocaleString() + '\n        </div>\n        <div style="margin-top:8px;display:flex;gap:8px;">\n          <button class="btn btn-primary" onclick="replyTo(' + JSON.stringify(email.from_address || '') + ', ' + JSON.stringify(email.subject || '') + ', ' + JSON.stringify(email.body_text || '') + ', ' + JSON.stringify(email.received_at || '') + ')">Reply</button>\n          <button class="btn btn-primary" onclick="forwardEmail(' + JSON.stringify(email.subject || '') + ', ' + JSON.stringify(email.body_text || '') + ', ' + JSON.stringify(email.received_at || '') + ', ' + JSON.stringify(email.from_address || '') + ')">Forward</button>\n          <button class="btn btn-danger" onclick="deleteEmail(' + Number(email.id) + ')">Delete</button>\n        </div>\n      </div>\n      <div class="viewer-body">' + renderBody(email) + '</div>\n      ' + renderAttachments(email.attachments || []) + '\n    ';
+    document.getElementById('viewer').innerHTML = '\n      <div class="viewer-header">\n        <div class="viewer-subject">' + esc(email.subject || '(no subject)') + '</div>\n        <div class="viewer-meta">\n          From: ' + safeFrom + '<br>\n          To: ' + esc(email.to_address) + '<br>\n          Date: ' + new Date(email.received_at).toLocaleString() + '\n        </div>\n        <div style="margin-top:8px;display:flex;gap:8px;">\n          <button class="btn btn-primary" id="replyInboxBtn">Reply</button>\n          <button class="btn btn-primary" id="forwardInboxBtn">Forward</button>\n          <button class="btn btn-danger" id="deleteInboxBtn">Delete</button>\n        </div>\n      </div>\n      <div class="viewer-body">' + renderBody(email) + '</div>\n      ' + renderAttachments(email.attachments || []) + '\n    ';
+
+    const replyInboxBtn = document.getElementById('replyInboxBtn');
+    if (replyInboxBtn) {
+      replyInboxBtn.addEventListener('click', () => {
+        replyTo(email.from_address || '', email.subject || '', email.body_text || '', email.received_at || '');
+      });
+    }
+
+    const forwardInboxBtn = document.getElementById('forwardInboxBtn');
+    if (forwardInboxBtn) {
+      forwardInboxBtn.addEventListener('click', () => {
+        forwardEmail(email.subject || '', email.body_text || '', email.received_at || '', email.from_address || '');
+      });
+    }
+
+    const deleteInboxBtn = document.getElementById('deleteInboxBtn');
+    if (deleteInboxBtn) {
+      deleteInboxBtn.addEventListener('click', () => {
+        deleteEmail(Number(email.id));
+      });
+    }
 
     document.querySelectorAll('.email-row').forEach((r) => {
       if ((r.getAttribute('onclick') || '').includes('loadEmail(' + Number(email.id) + ')')) {
@@ -236,7 +285,7 @@ export function getWebmailHtml(): string {
   function renderBody(email) {
     if (email.body_html) {
       const srcdoc = String(email.body_html).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-      return '<iframe sandbox="" srcdoc="' + srcdoc + '" style="width:100%;min-height:400px;border:none;"></iframe>';
+      return '<iframe sandbox="" referrerpolicy="no-referrer" srcdoc="' + srcdoc + '" style="width:100%;min-height:400px;border:none;"></iframe>';
     }
     return esc(email.body_text || '(empty)');
   }
@@ -250,7 +299,7 @@ export function getWebmailHtml(): string {
       const id = Number(attachment.id);
       const filename = String(attachment.filename || 'attachment');
       const size = formatBytes(Number(attachment.size_bytes || 0));
-      return '<div class="attachment-item"><div class="attachment-meta"><div class="attachment-name">' + esc(filename) + '</div><div class="attachment-size">' + esc(size) + '</div></div><button class="btn btn-secondary" onclick="downloadAttachment(' + id + ', ' + JSON.stringify(filename) + ')">Download</button></div>';
+      return '<div class="attachment-item"><div class="attachment-meta"><div class="attachment-name">' + esc(filename) + '</div><div class="attachment-size">' + esc(size) + '</div></div><button class="btn btn-secondary" onclick="downloadAttachment(' + id + ')">Download</button></div>';
     }).join('') + '</div>';
   }
 
@@ -261,7 +310,24 @@ export function getWebmailHtml(): string {
     return (n / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
-  async function downloadAttachment(id, filename) {
+  function parseAttachmentFilename(contentDisposition) {
+    const value = String(contentDisposition || '');
+    if (!value) return 'attachment';
+
+    const encodedMatch = /filename\*=UTF-8''([^;]+)/i.exec(value);
+    if (encodedMatch) {
+      try {
+        return decodeURIComponent(encodedMatch[1]);
+      } catch {
+        return 'attachment';
+      }
+    }
+
+    const plainMatch = /filename="?([^";]+)"?/i.exec(value);
+    return plainMatch ? plainMatch[1] : 'attachment';
+  }
+
+  async function downloadAttachment(id) {
     const res = await apiFetch('/api/attachments/' + Number(id) + '/download');
     if (res.status === 401) {
       logout();
@@ -274,6 +340,7 @@ export function getWebmailHtml(): string {
 
     const blob = await res.blob();
     const objectUrl = URL.createObjectURL(blob);
+    const filename = parseAttachmentFilename(res.headers.get('Content-Disposition'));
     const link = document.createElement('a');
     link.href = objectUrl;
     link.download = String(filename || 'attachment');
@@ -376,17 +443,25 @@ export function getWebmailHtml(): string {
     }
   }
 
-  function apiFetch(path, method = 'GET', body = null) {
-    const headers = {
-      Authorization: 'Bearer ' + TOKEN,
-    };
+  function apiFetch(path, method = 'GET', body = null, extraHeaders = null) {
+    const headers = {};
+
+    if (TOKEN) {
+      headers.Authorization = 'Bearer ' + TOKEN;
+    }
+
     if (body) {
       headers['Content-Type'] = 'application/json';
+    }
+
+    if (extraHeaders && typeof extraHeaders === 'object') {
+      Object.assign(headers, extraHeaders);
     }
 
     return fetch(path, {
       method,
       headers,
+      credentials: 'same-origin',
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
   }
