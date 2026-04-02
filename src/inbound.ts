@@ -1,5 +1,6 @@
 import PostalMime from 'postal-mime';
 import type { Env } from './index';
+import { sanitizeFilename } from './attachment-utils';
 
 const MAX_INBOUND_ATTACHMENT_COUNT = 25;
 const MAX_INBOUND_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -18,13 +19,6 @@ function toAttachmentBytes(content: unknown): Uint8Array | null {
   }
 
   return null;
-}
-
-function sanitizeFilename(filename: string): string {
-  const trimmed = filename.trim();
-  const safe = trimmed.replace(/[\\/:*?"<>|\u0000-\u001F]+/g, '_').replace(/\s+/g, ' ');
-  if (!safe) return 'attachment';
-  return safe.slice(0, 180);
 }
 
 function buildStorageKey(userId: number, emailId: number, filename: string): string {
