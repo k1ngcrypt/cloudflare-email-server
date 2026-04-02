@@ -11,6 +11,11 @@ binding = "DB"
 database_name = "webmail-db"
 database_id = "REPLACE_WITH_YOUR_D1_ID"
 
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "webmail-attachments"
+preview_bucket_name = "webmail-attachments"
+
 [vars]
 FROM_DOMAIN = "mail.yourdomain.com"
 OCI_SMTP_HOST = "smtp.email.us-ashburn-1.oci.oraclecloud.com"

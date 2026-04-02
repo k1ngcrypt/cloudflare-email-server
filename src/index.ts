@@ -3,6 +3,7 @@ import { handleRequest } from './api';
 
 export interface Env {
   DB: D1Database;
+  ATTACHMENTS: R2Bucket;
   FROM_DOMAIN: string;
   OCI_SMTP_HOST: string;
   OCI_SMTP_PORT: string;

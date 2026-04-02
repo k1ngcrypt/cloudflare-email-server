@@ -36,6 +36,21 @@ CREATE TABLE IF NOT EXISTS sent_emails (
   sent_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Attachment metadata: file bytes are stored in R2 using storage_key
+CREATE TABLE IF NOT EXISTS attachments (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id),
+  email_id      INTEGER REFERENCES emails(id) ON DELETE CASCADE,
+  sent_email_id INTEGER REFERENCES sent_emails(id) ON DELETE CASCADE,
+  storage_key   TEXT NOT NULL UNIQUE,
+  filename      TEXT NOT NULL,
+  mime_type     TEXT,
+  size_bytes    INTEGER NOT NULL,
+  content_id    TEXT,
+  disposition   TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Session tokens
 CREATE TABLE IF NOT EXISTS sessions (
   token         TEXT PRIMARY KEY,
@@ -48,3 +63,6 @@ CREATE INDEX IF NOT EXISTS idx_emails_user_folder ON emails(user_id, folder);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
 CREATE INDEX IF NOT EXISTS idx_sent_user_time ON sent_emails(user_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_sent ON attachments(sent_email_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
