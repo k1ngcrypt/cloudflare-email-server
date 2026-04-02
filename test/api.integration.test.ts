@@ -22,6 +22,33 @@ describe('worker HTTP API integration', () => {
     await resetState();
   });
 
+  it('responds to CORS preflight for trusted origins and withholds headers for untrusted origins', async () => {
+    const trusted = await apiRequest('/api/me', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://webmail.test',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+
+    expect(trusted.status).toBe(204);
+    expect(trusted.headers.get('access-control-allow-origin')).toBe('https://webmail.test');
+    expect(trusted.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(trusted.headers.get('access-control-allow-methods')).toContain('GET');
+
+    const untrusted = await apiRequest('/api/me', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://attacker.example',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+
+    expect(untrusted.status).toBe(204);
+    expect(untrusted.headers.get('access-control-allow-origin')).toBeNull();
+    expect(untrusted.headers.get('access-control-allow-credentials')).toBeNull();
+  });
+
   it('serves the webmail shell with hardened headers', async () => {
     const response = await apiRequest('/');
 
@@ -40,6 +67,33 @@ describe('worker HTTP API integration', () => {
 
     const body = await readJson<{ error: string }>(response);
     expect(body.error).toBe('Unauthorized');
+  });
+
+  it('validates malformed and incomplete login payloads', async () => {
+    const malformedJson = await apiRequest('/api/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: '{',
+    });
+
+    expect(malformedJson.status).toBe(400);
+    expect((await readJson<{ error: string }>(malformedJson)).error).toContain('required');
+
+    const emptyUsername = await login('   ', 'has-password');
+    expect(emptyUsername.response.status).toBe(400);
+
+    const missingPassword = await apiRequest('/api/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ username: 'alice' }),
+    });
+
+    expect(missingPassword.status).toBe(400);
+    expect((await readJson<{ error: string }>(missingPassword)).error).toContain('required');
   });
 
   it('issues cookie-backed sessions and revokes them on logout', async () => {
@@ -122,6 +176,43 @@ describe('worker HTTP API integration', () => {
 
     const blockedEvenWithCorrectPassword = await login(user.username, user.password, throttleHeaders);
     expect(blockedEvenWithCorrectPassword.response.status).toBe(429);
+  });
+
+  it('scopes login throttling by both client IP and username', async () => {
+    const blockedUser = await seedLegacyUser({
+      username: 'blocked-user',
+      email: 'blocked-user@mail.example.test',
+      password: 'Blocked-Password-123',
+    });
+
+    const unaffectedUser = await seedLegacyUser({
+      username: 'unaffected-user',
+      email: 'unaffected-user@mail.example.test',
+      password: 'Unaffected-Password-123',
+    });
+
+    const sharedIpHeaders = {
+      'CF-Connecting-IP': '198.51.100.77',
+    };
+
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      await login(blockedUser.username, `wrong-${attempt}`, sharedIpHeaders);
+    }
+
+    const blockedResponse = await login(blockedUser.username, blockedUser.password, sharedIpHeaders);
+    expect(blockedResponse.response.status).toBe(429);
+
+    const differentIpCanLogin = await login(blockedUser.username, blockedUser.password, {
+      'CF-Connecting-IP': '198.51.100.88',
+    });
+    expect(differentIpCanLogin.response.status).toBe(200);
+
+    const differentUsernameCanLogin = await login(
+      unaffectedUser.username,
+      unaffectedUser.password,
+      sharedIpHeaders
+    );
+    expect(differentUsernameCanLogin.response.status).toBe(200);
   });
 
   it('returns only mailbox owner emails, marks opens as read, and moves deletes to trash', async () => {
@@ -323,6 +414,81 @@ describe('worker HTTP API integration', () => {
     expect(await downloadResponse.text()).toBe('invoice-content');
   });
 
+  it('returns attachment download errors for missing metadata or missing R2 objects', async () => {
+    const session = await createAuthenticatedSession({
+      username: 'download-user',
+      email: 'download-user@mail.example.test',
+      password: 'Download-Pass-123',
+    });
+
+    const authHeader = { Authorization: `Bearer ${session.token}` };
+
+    const missingMetadata = await apiRequest('/api/attachments/999999/download', {
+      headers: authHeader,
+    });
+    expect(missingMetadata.status).toBe(404);
+    expect((await readJson<{ error: string }>(missingMetadata)).error).toContain('Attachment not found');
+
+    const orphanAttachment = await bindings()
+      .DB.prepare(
+        `
+          INSERT INTO attachments
+            (user_id, email_id, sent_email_id, storage_key, filename, mime_type, size_bytes, content_id, disposition)
+          VALUES (?, NULL, NULL, ?, ?, ?, ?, NULL, 'attachment')
+          RETURNING id
+        `
+      )
+      .bind(session.id, 'missing/object/key', 'missing.txt', 'text/plain', 5)
+      .first<{ id: number }>();
+
+    const missingObject = await apiRequest(`/api/attachments/${orphanAttachment?.id}/download`, {
+      headers: authHeader,
+    });
+
+    expect(missingObject.status).toBe(404);
+    expect((await readJson<{ error: string }>(missingObject)).error).toContain(
+      'Attachment content not found'
+    );
+  });
+
+  it('escapes unsafe attachment filenames in content-disposition headers', async () => {
+    const session = await createAuthenticatedSession({
+      username: 'filename-user',
+      email: 'filename-user@mail.example.test',
+      password: 'Filename-Pass-123',
+    });
+
+    const storageKey = `incoming/${session.id}/unsafe-name`;
+    await bindings().ATTACHMENTS.put(storageKey, 'unsafe');
+
+    const attachment = await bindings()
+      .DB.prepare(
+        `
+          INSERT INTO attachments
+            (user_id, email_id, sent_email_id, storage_key, filename, mime_type, size_bytes, content_id, disposition)
+          VALUES (?, NULL, NULL, ?, ?, ?, ?, NULL, 'attachment')
+          RETURNING id
+        `
+      )
+      .bind(session.id, storageKey, 'bad"name\\\r\n.txt', 'text/plain', 6)
+      .first<{ id: number }>();
+
+    const response = await apiRequest(`/api/attachments/${attachment?.id}/download`, {
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const disposition = response.headers.get('content-disposition') ?? '';
+    expect(disposition).toContain('attachment; filename="');
+    expect(disposition).toContain('bad_name');
+    expect(disposition).not.toContain('bad"name');
+    expect(disposition).not.toContain('\\');
+    expect(disposition).not.toContain('\r');
+    expect(disposition).not.toContain('\n');
+  });
+
   it('validates send payload attachments before attempting SMTP delivery', async () => {
     const session = await createAuthenticatedSession({
       username: 'composer',
@@ -384,5 +550,69 @@ describe('worker HTTP API integration', () => {
 
     expect(tooManyAttachments.status).toBe(400);
     expect((await readJson<{ error: string }>(tooManyAttachments)).error).toContain('Too many attachments');
+
+    const missingFields = await apiRequest('/api/send', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        to: 'recipient@example.net',
+        subject: 'Missing text',
+      }),
+    });
+
+    expect(missingFields.status).toBe(400);
+    expect((await readJson<{ error: string }>(missingFields)).error).toContain('required');
+
+    const invalidAttachmentShape = await apiRequest('/api/send', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        to: 'recipient@example.net',
+        subject: 'Test',
+        text: 'Hello',
+        attachments: [null],
+      }),
+    });
+
+    expect(invalidAttachmentShape.status).toBe(400);
+    expect((await readJson<{ error: string }>(invalidAttachmentShape)).error).toContain(
+      'Invalid attachment at index 0'
+    );
+
+    const dataUrlWithoutPayload = await apiRequest('/api/send', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        to: 'recipient@example.net',
+        subject: 'Test',
+        text: 'Hello',
+        attachments: [
+          {
+            filename: 'empty.txt',
+            content: 'data:text/plain;base64',
+          },
+        ],
+      }),
+    });
+
+    expect(dataUrlWithoutPayload.status).toBe(400);
+    expect((await readJson<{ error: string }>(dataUrlWithoutPayload)).error).toContain('has no content');
+  });
+
+  it('returns not found for unknown authenticated routes', async () => {
+    const session = await createAuthenticatedSession({
+      username: 'unknown-route-user',
+      email: 'unknown-route-user@mail.example.test',
+      password: 'Unknown-Route-Pass-123',
+    });
+
+    const response = await apiRequest('/api/no-such-route', {
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+      },
+    });
+
+    expect(response.status).toBe(404);
+    expect((await readJson<{ error: string }>(response)).error).toBe('Not found');
   });
 });

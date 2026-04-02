@@ -41,7 +41,49 @@ function buildMultipartMime(toAddress: string): string {
   ].join('\r\n');
 }
 
-function createForwardableEmailMessage(rawEmail: string, toAddress: string): {
+function buildMimeWithoutFromOrSubject(toAddress: string): string {
+  return [
+    `To: ${toAddress}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Fallback metadata body.',
+  ].join('\r\n');
+}
+
+function buildMultipartMimeWithAttachmentCount(toAddress: string, count: number): string {
+  const lines = [
+    'From: "Sender" <sender@example.net>',
+    `To: ${toAddress}`,
+    `Subject: Too many attachments (${count})`,
+    'Message-ID: <too-many-attachments@example.net>',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary="many-boundary"',
+    '',
+    '--many-boundary',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'This message intentionally has many attachments.',
+  ];
+
+  for (let i = 0; i < count; i += 1) {
+    lines.push('--many-boundary');
+    lines.push(`Content-Type: text/plain; name="file-${i + 1}.txt"`);
+    lines.push(`Content-Disposition: attachment; filename="file-${i + 1}.txt"`);
+    lines.push('Content-Transfer-Encoding: base64');
+    lines.push('');
+    lines.push('YQ==');
+  }
+
+  lines.push('--many-boundary--');
+  return lines.join('\r\n');
+}
+
+function createForwardableEmailMessage(
+  rawEmail: string,
+  toAddress: string,
+  envelopeFrom = 'sender@example.net'
+): {
   message: any;
   rejections: string[];
 } {
@@ -53,7 +95,7 @@ function createForwardableEmailMessage(rawEmail: string, toAddress: string): {
   const rejections: string[] = [];
 
   const message = {
-    from: 'sender@example.net',
+    from: envelopeFrom,
     to: toAddress,
     raw: stream,
     rawSize: new TextEncoder().encode(rawEmail).byteLength,
@@ -163,6 +205,75 @@ describe('inbound email handler integration', () => {
     const object = await getBindings().ATTACHMENTS.get(attachmentRow?.storage_key as string);
     expect(object).toBeTruthy();
     expect(await object?.text()).toBe('hello attachment');
+  });
+
+  it('normalizes recipient casing and falls back to envelope metadata defaults', async () => {
+    const user = await seedLegacyUser({
+      username: 'normalized-user',
+      email: 'normalized-user@mail.example.test',
+      password: 'Normalize-Pass-123',
+    });
+
+    const envelopeTo = `   ${user.email.toUpperCase()}   `;
+    const envelopeFrom = 'envelope-sender@example.net';
+    const raw = buildMimeWithoutFromOrSubject(user.email.toUpperCase());
+
+    const { message, rejections } = createForwardableEmailMessage(raw, envelopeTo, envelopeFrom);
+
+    const ctx = createExecutionContext();
+    await worker.email(message, getBindings(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(rejections).toHaveLength(0);
+
+    const emailRow = await getBindings()
+      .DB.prepare(
+        `
+          SELECT to_address, from_address, from_name, subject, body_text
+          FROM emails
+          WHERE user_id = ?
+        `
+      )
+      .bind(user.id)
+      .first<{
+        to_address: string;
+        from_address: string;
+        from_name: string | null;
+        subject: string;
+        body_text: string | null;
+      }>();
+
+    expect(emailRow).toBeTruthy();
+    expect(emailRow?.to_address).toBe(user.email);
+    expect(emailRow?.from_address).toBe(envelopeFrom);
+    expect(emailRow?.from_name).toBeNull();
+    expect(emailRow?.subject).toBe('(no subject)');
+    expect(emailRow?.body_text).toContain('Fallback metadata body.');
+  });
+
+  it('rejects inbound messages that exceed attachment count limits', async () => {
+    const user = await seedLegacyUser({
+      username: 'too-many-inbound',
+      email: 'too-many-inbound@mail.example.test',
+      password: 'Too-Many-Pass-123',
+    });
+
+    const raw = buildMultipartMimeWithAttachmentCount(user.email, 26);
+    const { message, rejections } = createForwardableEmailMessage(raw, user.email);
+
+    const ctx = createExecutionContext();
+    await worker.email(message, getBindings(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(rejections).toContain('Too many attachments (max 25)');
+
+    const counts = await Promise.all([
+      getBindings().DB.prepare('SELECT COUNT(*) AS count FROM emails').first<{ count: number }>(),
+      getBindings().DB.prepare('SELECT COUNT(*) AS count FROM attachments').first<{ count: number }>(),
+    ]);
+
+    expect(counts[0]?.count ?? 0).toBe(0);
+    expect(counts[1]?.count ?? 0).toBe(0);
   });
 
   it('rejects with temporary failure and rolls back DB state when storage write fails', async () => {
