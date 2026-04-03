@@ -33,6 +33,7 @@ interface ListSendersPageOptions {
 interface ListSendersPageResult {
   items: SenderSummary[];
   nextPage: string | null;
+  requestId: string | null;
 }
 
 export class ApprovedSenderSyncError extends Error {
@@ -313,17 +314,35 @@ async function listSendersPage(
   });
 
   if (!response.ok) {
+    const requestId = response.headers.get('opc-request-id');
     const detail = await readOciError(response);
+    console.error('OCI approved sender list failed', {
+      emailFilter: options.emailAddress ?? null,
+      page: options.page ?? null,
+      status: response.status,
+      requestId,
+      detail,
+    });
     throw new Error(`Failed to list approved senders (${response.status}): ${detail}`);
   }
 
   const payload = (await response.json().catch(() => ({}))) as ListSendersResponseBody;
   const items = Array.isArray(payload.items) ? payload.items : [];
   const nextPage = response.headers.get('opc-next-page');
+  const requestId = response.headers.get('opc-request-id');
+
+  console.info('OCI approved sender list page loaded', {
+    emailFilter: options.emailAddress ?? null,
+    page: options.page ?? null,
+    itemCount: items.length,
+    nextPage: nextPage && nextPage.trim().length > 0 ? nextPage : null,
+    requestId,
+  });
 
   return {
     items,
     nextPage: nextPage && nextPage.trim().length > 0 ? nextPage : null,
+    requestId,
   };
 }
 
@@ -346,6 +365,14 @@ async function findApprovedSenderInPages(
       if (itemEmail !== normalizedEmailAddress || isSenderDeleted(item.lifecycleState)) {
         continue;
       }
+
+      console.info('OCI approved sender lookup matched sender', {
+        emailAddress: normalizedEmailAddress,
+        senderId: item.id,
+        lifecycleState: item.lifecycleState ?? null,
+        page: page ?? null,
+        requestId: pageResult.requestId,
+      });
 
       return item;
     }
@@ -374,9 +401,20 @@ async function findApprovedSenderByEmail(env: Env, emailAddress: string): Promis
     return filteredMatch;
   }
 
+  console.warn('OCI approved sender filtered lookup missed; falling back to unfiltered scan', {
+    emailAddress: normalized,
+  });
+
   // Some OCI tenancies can return incomplete filtered results; fall back to
   // scanning pages without an email filter before concluding the sender is absent.
-  return findApprovedSenderInPages(env, normalized, {});
+  const fallbackMatch = await findApprovedSenderInPages(env, normalized, {});
+  if (!fallbackMatch) {
+    console.warn('OCI approved sender lookup found no matching sender', {
+      emailAddress: normalized,
+    });
+  }
+
+  return fallbackMatch;
 }
 
 async function ensureApprovedSender(env: Env, emailAddress: string): Promise<boolean> {
@@ -412,8 +450,15 @@ async function removeApprovedSender(env: Env, emailAddress: string): Promise<voi
     return;
   }
 
+  console.info('OCI approved sender removal starting', {
+    emailAddress: normalized,
+  });
+
   const sender = await findApprovedSenderByEmail(env, normalized);
   if (!sender) {
+    console.warn('OCI approved sender removal skipped because sender was not found', {
+      emailAddress: normalized,
+    });
     return;
   }
 
@@ -425,11 +470,26 @@ async function removeApprovedSender(env: Env, emailAddress: string): Promise<voi
     },
   });
 
+  const deleteRequestId = response.headers.get('opc-request-id');
+  console.info('OCI approved sender delete response received', {
+    emailAddress: normalized,
+    senderId: sender.id,
+    status: response.status,
+    requestId: deleteRequestId,
+  });
+
   if (response.ok || response.status === 404) {
     return;
   }
 
   const detail = await readOciError(response);
+  console.error('OCI approved sender delete failed', {
+    emailAddress: normalized,
+    senderId: sender.id,
+    status: response.status,
+    requestId: deleteRequestId,
+    detail,
+  });
   throw new Error(`Failed to delete approved sender for ${normalized} (${response.status}): ${detail}`);
 }
 
@@ -468,5 +528,14 @@ export async function ensureApprovedSenders(env: Env, emailAddresses: string[]):
 
 export async function removeApprovedSenders(env: Env, emailAddresses: string[]): Promise<void> {
   const uniqueEmailAddresses = normalizeUniqueEmailAddresses(emailAddresses);
+  console.info('OCI approved sender batch removal starting', {
+    requestedCount: emailAddresses.length,
+    uniqueCount: uniqueEmailAddresses.length,
+    emails: uniqueEmailAddresses,
+  });
   await Promise.all(uniqueEmailAddresses.map((emailAddress) => removeApprovedSender(env, emailAddress)));
+  console.info('OCI approved sender batch removal completed', {
+    removedCount: uniqueEmailAddresses.length,
+    emails: uniqueEmailAddresses,
+  });
 }
