@@ -23,8 +23,39 @@ interface ListSendersResponseBody {
   items?: SenderSummary[];
 }
 
+export class ApprovedSenderSyncError extends Error {
+  readonly createdAddresses: string[];
+
+  constructor(message: string, createdAddresses: string[]) {
+    super(message);
+    this.name = 'ApprovedSenderSyncError';
+    this.createdAddresses = createdAddresses;
+  }
+}
+
+const textEncoder = new TextEncoder();
+let cachedSigningKeyPem: string | null = null;
+let cachedSigningKeyPromise: Promise<CryptoKey> | null = null;
+
 function normalizeEmailAddress(address: string): string {
   return address.trim().toLowerCase();
+}
+
+function normalizeUniqueEmailAddresses(emailAddresses: string[]): string[] {
+  const uniqueAddresses: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of emailAddresses) {
+    const normalized = normalizeEmailAddress(String(value ?? ''));
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    uniqueAddresses.push(normalized);
+  }
+
+  return uniqueAddresses;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -72,8 +103,13 @@ async function sha256Base64(content: Uint8Array): Promise<string> {
   return bytesToBase64(new Uint8Array(digest));
 }
 
-async function signOciRequest(signingString: string, privateKeyPem: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
+function getOciSigningKey(privateKeyPem: string): Promise<CryptoKey> {
+  if (cachedSigningKeyPromise && cachedSigningKeyPem === privateKeyPem) {
+    return cachedSigningKeyPromise;
+  }
+
+  cachedSigningKeyPem = privateKeyPem;
+  cachedSigningKeyPromise = crypto.subtle.importKey(
     'pkcs8',
     pemToDerBytes(privateKeyPem) as unknown as BufferSource,
     {
@@ -84,10 +120,21 @@ async function signOciRequest(signingString: string, privateKeyPem: string): Pro
     ['sign']
   );
 
+  cachedSigningKeyPromise.catch(() => {
+    cachedSigningKeyPem = null;
+    cachedSigningKeyPromise = null;
+  });
+
+  return cachedSigningKeyPromise;
+}
+
+async function signOciRequest(signingString: string, privateKeyPem: string): Promise<string> {
+  const key = await getOciSigningKey(privateKeyPem);
+
   const signature = await crypto.subtle.sign(
     'RSASSA-PKCS1-v1_5',
     key,
-    new TextEncoder().encode(signingString)
+    textEncoder.encode(signingString)
   );
 
   return bytesToBase64(new Uint8Array(signature));
@@ -270,11 +317,6 @@ async function ensureApprovedSender(env: Env, emailAddress: string): Promise<boo
     return false;
   }
 
-  const existing = await findApprovedSenderByEmail(env, normalized);
-  if (existing) {
-    return false;
-  }
-
   const createResponse = await requestOciEmailControlPlane(env, {
     method: 'POST',
     path: '/senders',
@@ -321,20 +363,39 @@ async function removeApprovedSender(env: Env, emailAddress: string): Promise<voi
 }
 
 export async function ensureApprovedSenders(env: Env, emailAddresses: string[]): Promise<string[]> {
-  const createdAddresses: string[] = [];
+  const uniqueEmailAddresses = normalizeUniqueEmailAddresses(emailAddresses);
+  const settled = await Promise.allSettled(
+    uniqueEmailAddresses.map(async (emailAddress) => ({
+      emailAddress,
+      created: await ensureApprovedSender(env, emailAddress),
+    }))
+  );
 
-  for (const emailAddress of emailAddresses) {
-    const created = await ensureApprovedSender(env, emailAddress);
-    if (created) {
-      createdAddresses.push(normalizeEmailAddress(emailAddress));
+  const createdAddresses: string[] = [];
+  let firstError: unknown = null;
+
+  for (const result of settled) {
+    if (result.status === 'fulfilled') {
+      if (result.value.created) {
+        createdAddresses.push(result.value.emailAddress);
+      }
+      continue;
     }
+
+    if (firstError === null) {
+      firstError = result.reason;
+    }
+  }
+
+  if (firstError !== null) {
+    const message = firstError instanceof Error ? firstError.message : 'Failed to ensure approved senders';
+    throw new ApprovedSenderSyncError(message, createdAddresses);
   }
 
   return createdAddresses;
 }
 
 export async function removeApprovedSenders(env: Env, emailAddresses: string[]): Promise<void> {
-  for (const emailAddress of emailAddresses) {
-    await removeApprovedSender(env, emailAddress);
-  }
+  const uniqueEmailAddresses = normalizeUniqueEmailAddresses(emailAddresses);
+  await Promise.all(uniqueEmailAddresses.map((emailAddress) => removeApprovedSender(env, emailAddress)));
 }

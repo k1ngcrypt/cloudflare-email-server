@@ -34,7 +34,11 @@ import {
   listUserEmailAddresses,
   normalizeEmailAddress,
 } from './user-addresses';
-import { ensureApprovedSenders, removeApprovedSenders } from './oracle-approved-senders';
+import {
+  ApprovedSenderSyncError,
+  ensureApprovedSenders,
+  removeApprovedSenders,
+} from './oracle-approved-senders';
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -451,10 +455,12 @@ async function validateEmailAvailability(
   emails: string[],
   currentUserId?: number
 ): Promise<string | null> {
-  for (const email of emails) {
-    const ownerId = await findOwnerIdByEmail(env, email);
+  const ownerIds = await Promise.all(emails.map((email) => findOwnerIdByEmail(env, email)));
+
+  for (let i = 0; i < emails.length; i += 1) {
+    const ownerId = ownerIds[i];
     if (ownerId !== null && ownerId !== currentUserId) {
-      return `${email} is already assigned to another user`;
+      return `${emails[i]} is already assigned to another user`;
     }
   }
 
@@ -1150,29 +1156,62 @@ api.post(
     }
 
     const username = body.username.trim();
-    const usernameError = await validateUsernameAvailability(c.env, username);
+    const [usernameError, emailError] = await Promise.all([
+      validateUsernameAvailability(c.env, username),
+      validateEmailAvailability(c.env, desiredEmails),
+    ]);
+
     if (usernameError) {
       return c.json({ error: usernameError }, 409);
     }
 
-    const emailError = await validateEmailAvailability(c.env, desiredEmails);
     if (emailError) {
       return c.json({ error: emailError }, 409);
     }
 
-    let createdApprovedSenders: string[] = [];
-    try {
-      createdApprovedSenders = await ensureApprovedSenders(c.env, desiredEmails);
-    } catch (err) {
-      console.error('Failed to ensure OCI approved sender set during user create:', err);
+    const [passwordHashResult, approvedSendersResult] = await Promise.allSettled([
+      hashPassword(body.password),
+      ensureApprovedSenders(c.env, desiredEmails),
+    ]);
+
+    if (approvedSendersResult.status === 'rejected') {
+      const rollbackAddresses =
+        approvedSendersResult.reason instanceof ApprovedSenderSyncError
+          ? approvedSendersResult.reason.createdAddresses
+          : [];
+
+      if (rollbackAddresses.length > 0) {
+        try {
+          await removeApprovedSenders(c.env, rollbackAddresses);
+        } catch (rollbackErr) {
+          console.error(
+            'Failed to rollback OCI approved senders after create sync error:',
+            rollbackErr
+          );
+        }
+      }
+
+      console.error('Failed to ensure OCI approved sender set during user create:', approvedSendersResult.reason);
       return c.json(
-        { error: err instanceof Error ? err.message : 'OCI approved sender sync failed' },
+        {
+          error:
+            approvedSendersResult.reason instanceof Error
+              ? approvedSendersResult.reason.message
+              : 'OCI approved sender sync failed',
+        },
         502
       );
     }
 
+    if (passwordHashResult.status === 'rejected') {
+      console.error('Failed to hash password during user create:', passwordHashResult.reason);
+      return c.json({ error: 'Failed to create user' }, 500);
+    }
+
+    const passwordHash = passwordHashResult.value;
+    const createdApprovedSenders = approvedSendersResult.value;
+
     try {
-      const passwordHash = await hashPassword(body.password);
       const inserted = await c.env.DB.prepare(
         `
           INSERT INTO users (username, email, password_hash)
@@ -1187,8 +1226,10 @@ api.post(
         throw new Error('Failed to create user');
       }
 
-      await replaceUserEmailAddresses(c.env, inserted.id, desiredEmails);
-      await setUserRole(c.env, inserted.id, body.role);
+      await Promise.all([
+        replaceUserEmailAddresses(c.env, inserted.id, desiredEmails),
+        setUserRole(c.env, inserted.id, body.role),
+      ]);
 
       const createdUser = await getAdminUserById(c.env, inserted.id);
       if (!createdUser) {
@@ -1250,12 +1291,15 @@ api.put(
     }
 
     const username = body.username.trim();
-    const usernameError = await validateUsernameAvailability(c.env, username, userId);
+    const [usernameError, emailError] = await Promise.all([
+      validateUsernameAvailability(c.env, username, userId),
+      validateEmailAvailability(c.env, desiredEmails, userId),
+    ]);
+
     if (usernameError) {
       return c.json({ error: usernameError }, 409);
     }
 
-    const emailError = await validateEmailAvailability(c.env, desiredEmails, userId);
     if (emailError) {
       return c.json({ error: emailError }, 409);
     }
@@ -1263,29 +1307,62 @@ api.put(
     const oldEmails = existing.emails;
     const emailsToDelete = difference(oldEmails, desiredEmails);
 
-    let createdApprovedSenders: string[] = [];
-    try {
-      createdApprovedSenders = await ensureApprovedSenders(c.env, desiredEmails);
-    } catch (err) {
-      console.error('Failed to ensure OCI approved sender set during user update:', err);
+    const shouldUpdatePassword = typeof body.password === 'string' && body.password.length > 0;
+    const [passwordHashResult, approvedSendersResult] = await Promise.allSettled([
+      shouldUpdatePassword ? hashPassword(body.password as string) : Promise.resolve<string | null>(null),
+      ensureApprovedSenders(c.env, desiredEmails),
+    ]);
+
+    if (approvedSendersResult.status === 'rejected') {
+      const rollbackAddresses =
+        approvedSendersResult.reason instanceof ApprovedSenderSyncError
+          ? approvedSendersResult.reason.createdAddresses
+          : [];
+
+      if (rollbackAddresses.length > 0) {
+        try {
+          await removeApprovedSenders(c.env, rollbackAddresses);
+        } catch (rollbackErr) {
+          console.error(
+            'Failed to rollback OCI approved senders after update sync error:',
+            rollbackErr
+          );
+        }
+      }
+
+      console.error('Failed to ensure OCI approved sender set during user update:', approvedSendersResult.reason);
       return c.json(
-        { error: err instanceof Error ? err.message : 'OCI approved sender sync failed' },
+        {
+          error:
+            approvedSendersResult.reason instanceof Error
+              ? approvedSendersResult.reason.message
+              : 'OCI approved sender sync failed',
+        },
         502
       );
     }
+
+    if (passwordHashResult.status === 'rejected') {
+      console.error('Failed to hash password during user update:', passwordHashResult.reason);
+      return c.json({ error: 'Failed to update user' }, 500);
+    }
+
+    const createdApprovedSenders = approvedSendersResult.value;
+    const nextPasswordHash = passwordHashResult.value;
 
     try {
       await c.env.DB.prepare('UPDATE users SET username = ?, email = ? WHERE id = ?')
         .bind(username, desiredEmails[0], userId)
         .run();
 
-      await replaceUserEmailAddresses(c.env, userId, desiredEmails);
-      await setUserRole(c.env, userId, body.role);
+      await Promise.all([
+        replaceUserEmailAddresses(c.env, userId, desiredEmails),
+        setUserRole(c.env, userId, body.role),
+      ]);
 
-      if (typeof body.password === 'string' && body.password.length > 0) {
-        const passwordHash = await hashPassword(body.password);
+      if (nextPasswordHash) {
         await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-          .bind(passwordHash, userId)
+          .bind(nextPasswordHash, userId)
           .run();
       }
     } catch (err) {
