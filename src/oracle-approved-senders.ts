@@ -227,6 +227,7 @@ async function requestOciEmailControlPlane(
     method: 'GET' | 'POST' | 'DELETE';
     path: string;
     query?: Record<string, string | number | boolean | undefined>;
+    headers?: Record<string, string | undefined>;
     body?: unknown;
   }
 ): Promise<Response> {
@@ -275,6 +276,14 @@ async function requestOciEmailControlPlane(
 
   const authorization = await buildAuthorizationHeader(env, signedHeaderNames, signingValues);
   headers.set('Authorization', authorization);
+
+  if (options.headers) {
+    for (const [key, value] of Object.entries(options.headers)) {
+      if (value !== undefined) {
+        headers.set(key, value);
+      }
+    }
+  }
 
   return fetch(requestUrl.toString(), {
     method: options.method,
@@ -417,6 +426,42 @@ async function findApprovedSenderByEmail(env: Env, emailAddress: string): Promis
   return fallbackMatch;
 }
 
+async function getApprovedSenderEtag(env: Env, senderId: string): Promise<string | null> {
+  const response = await requestOciEmailControlPlane(env, {
+    method: 'GET',
+    path: `/senders/${encodeURIComponent(senderId)}`,
+  });
+
+  const requestId = response.headers.get('opc-request-id');
+  if (response.status === 404) {
+    console.warn('OCI approved sender detail lookup returned not found', {
+      senderId,
+      requestId,
+    });
+    return null;
+  }
+
+  if (!response.ok) {
+    const detail = await readOciError(response);
+    console.error('OCI approved sender detail lookup failed', {
+      senderId,
+      status: response.status,
+      requestId,
+      detail,
+    });
+    throw new Error(`Failed to get approved sender details for ${senderId} (${response.status}): ${detail}`);
+  }
+
+  const etag = response.headers.get('etag');
+  console.info('OCI approved sender detail lookup succeeded', {
+    senderId,
+    hasEtag: Boolean(etag),
+    requestId,
+  });
+
+  return etag;
+}
+
 async function ensureApprovedSender(env: Env, emailAddress: string): Promise<boolean> {
   const normalized = normalizeEmailAddress(emailAddress);
   if (!normalized) {
@@ -462,11 +507,23 @@ async function removeApprovedSender(env: Env, emailAddress: string): Promise<voi
     return;
   }
 
+  const etag = await getApprovedSenderEtag(env, sender.id);
+  if (etag === null) {
+    console.warn('OCI approved sender removal skipped because sender details were not found', {
+      emailAddress: normalized,
+      senderId: sender.id,
+    });
+    return;
+  }
+
   const response = await requestOciEmailControlPlane(env, {
     method: 'DELETE',
     path: `/senders/${encodeURIComponent(sender.id)}`,
     query: {
       isLockOverride: true,
+    },
+    headers: {
+      'if-match': etag,
     },
   });
 
@@ -474,6 +531,7 @@ async function removeApprovedSender(env: Env, emailAddress: string): Promise<voi
   console.info('OCI approved sender delete response received', {
     emailAddress: normalized,
     senderId: sender.id,
+    hasIfMatch: Boolean(etag),
     status: response.status,
     requestId: deleteRequestId,
   });

@@ -118,8 +118,28 @@ describe('removeApprovedSenders', () => {
         }
       }
 
+      if (method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
+        return new Response(
+          JSON.stringify({
+            sender: {
+              id: 'ocid1.sender.oc1..target',
+              emailAddress: 'alias@example.test',
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+              etag: 'W/"sender-etag-1"',
+            },
+          }
+        );
+      }
+
       if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
         expect(requestUrl.searchParams.get('isLockOverride')).toBe('true');
+        const headers = new Headers(init?.headers);
+        expect(headers.get('if-match')).toBe('W/"sender-etag-1"');
         return new Response(null, { status: 204 });
       }
 
