@@ -474,6 +474,18 @@ export function getWebmailHtml(): string {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+  // Expose inline onclick handlers on the global window object
+  // so inline attributes like onclick="doLogin()" resolve.
+  Object.assign(window, {
+    doLogin,
+    logout,
+    loadFolder,
+    openCompose,
+    toggleCompose,
+    doSend,
+    loadEmail,
+    downloadAttachment,
+  });
 </script>
 </body>
 </html>`;

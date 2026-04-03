@@ -499,7 +499,7 @@ describe('worker HTTP API integration', () => {
     expect(disposition).not.toContain('\n');
   });
 
-  it('validates send payload attachments before attempting SMTP delivery', async () => {
+  it('validates send payload attachments before attempting HTTPS delivery', async () => {
     const session = await createAuthenticatedSession({
       username: 'composer',
       email: 'composer@mail.example.test',

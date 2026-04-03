@@ -6,10 +6,12 @@ export interface Env {
   ATTACHMENTS: R2Bucket;
   FROM_DOMAIN: string;
   APP_ORIGIN?: string;
-  OCI_SMTP_HOST: string;
-  OCI_SMTP_PORT: string;
-  OCI_SMTP_USER: string;
-  OCI_SMTP_PASS: string;
+  OCI_EMAIL_ENDPOINT: string;
+  OCI_EMAIL_COMPARTMENT_OCID: string;
+  OCI_EMAIL_API_TENANCY_OCID: string;
+  OCI_EMAIL_API_USER_OCID: string;
+  OCI_EMAIL_API_KEY_FINGERPRINT: string;
+  OCI_EMAIL_API_PRIVATE_KEY: string;
   AUTH_SECRET: string;
 }
 

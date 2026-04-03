@@ -9,7 +9,7 @@ enabled = true
 [[d1_databases]]
 binding = "DB"
 database_name = "webmail-db"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "e8801a87-06b0-44e4-910c-4a55c3742958"
 
 [[r2_buckets]]
 binding = "ATTACHMENTS"
@@ -18,5 +18,5 @@ preview_bucket_name = "webmail-attachments"
 
 [vars]
 FROM_DOMAIN = "mail.yourdomain.com"
-OCI_SMTP_HOST = "smtp.email.us-ashburn-1.oci.oraclecloud.com"
-OCI_SMTP_PORT = "587"
+OCI_EMAIL_ENDPOINT = "https://cell0.submit.email.ca-montreal-1.oci.oraclecloud.com"
+OCI_EMAIL_COMPARTMENT_OCID = "ocid1.tenancy.oc1..aaaaaaaanl6exevvdu277x7w6fc7ac3lkdv6ufox36utlv6gsc4rcvqjktda"
