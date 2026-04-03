@@ -347,6 +347,56 @@ describe('worker HTTP API integration', () => {
     const trashBody = await readJson<Array<{ id: number }>>(trashAfterDelete);
     expect(trashBody).toHaveLength(1);
     expect(trashBody[0].id).toBe(ownerEmail?.id);
+
+    const restoreResponse = await apiRequest(`/api/emails/${ownerEmail?.id}/restore`, {
+      method: 'POST',
+      headers: authHeader,
+    });
+    expect(restoreResponse.status).toBe(200);
+
+    const inboxAfterRestore = await apiRequest('/api/emails?folder=inbox', {
+      headers: authHeader,
+    });
+    const inboxAfterRestoreBody = await readJson<Array<{ id: number }>>(inboxAfterRestore);
+    expect(inboxAfterRestoreBody).toHaveLength(1);
+    expect(inboxAfterRestoreBody[0].id).toBe(ownerEmail?.id);
+
+    const hardDeleteFromInbox = await apiRequest(`/api/emails/${ownerEmail?.id}?hard=1`, {
+      method: 'DELETE',
+      headers: authHeader,
+    });
+    expect(hardDeleteFromInbox.status).toBe(400);
+
+    const moveToTrashAgain = await apiRequest(`/api/emails/${ownerEmail?.id}`, {
+      method: 'DELETE',
+      headers: authHeader,
+    });
+    expect(moveToTrashAgain.status).toBe(200);
+
+    const hardDeleteFromTrash = await apiRequest(`/api/emails/${ownerEmail?.id}?hard=1`, {
+      method: 'DELETE',
+      headers: authHeader,
+    });
+    expect(hardDeleteFromTrash.status).toBe(200);
+
+    const trashAfterHardDelete = await apiRequest('/api/emails?folder=trash', {
+      headers: authHeader,
+    });
+    expect(await readJson<Array<{ id: number }>>(trashAfterHardDelete)).toHaveLength(0);
+
+    const emailAfterHardDelete = await apiRequest(`/api/emails/${ownerEmail?.id}`, {
+      headers: authHeader,
+    });
+    expect(emailAfterHardDelete.status).toBe(404);
+
+    const attachmentMetadataAfterHardDelete = await bindings()
+      .DB.prepare('SELECT COUNT(*) AS count FROM attachments WHERE id = ?')
+      .bind(ownerAttachment?.id)
+      .first<{ count: number }>();
+    expect(attachmentMetadataAfterHardDelete?.count ?? 0).toBe(0);
+
+    const attachmentObjectAfterHardDelete = await bindings().ATTACHMENTS.get(ownerAttachmentKey);
+    expect(attachmentObjectAfterHardDelete).toBeNull();
   });
 
   it('returns sent mailbox details and supports authenticated attachment download', async () => {
@@ -422,6 +472,31 @@ describe('worker HTTP API integration', () => {
     expect(downloadResponse.headers.get('content-type')).toContain('text/plain');
     expect(downloadResponse.headers.get('content-disposition')).toContain('invoice.txt');
     expect(await downloadResponse.text()).toBe('invoice-content');
+
+    const deleteSentResponse = await apiRequest(`/api/sent/${sentRow?.id}`, {
+      method: 'DELETE',
+      headers: authHeader,
+    });
+    expect(deleteSentResponse.status).toBe(200);
+
+    const sentAfterDelete = await apiRequest('/api/sent', {
+      headers: authHeader,
+    });
+    expect(await readJson<Array<{ id: number }>>(sentAfterDelete)).toHaveLength(0);
+
+    const sentDetailAfterDelete = await apiRequest(`/api/sent/${sentRow?.id}`, {
+      headers: authHeader,
+    });
+    expect(sentDetailAfterDelete.status).toBe(404);
+
+    const sentAttachmentMetadataAfterDelete = await bindings()
+      .DB.prepare('SELECT COUNT(*) AS count FROM attachments WHERE sent_email_id = ?')
+      .bind(sentRow?.id)
+      .first<{ count: number }>();
+    expect(sentAttachmentMetadataAfterDelete?.count ?? 0).toBe(0);
+
+    const sentAttachmentObjectAfterDelete = await bindings().ATTACHMENTS.get(storageKey);
+    expect(sentAttachmentObjectAfterDelete).toBeNull();
   });
 
   it('returns attachment download errors for missing metadata or missing R2 objects', async () => {

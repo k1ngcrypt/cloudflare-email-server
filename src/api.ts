@@ -7,7 +7,7 @@ import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
 import { z } from 'zod';
 import type { Env } from './index';
-import { getWebmailHtml } from './webmail.ts';
+import { getWebmailHtml } from './webmail';
 import {
   authenticate,
   clearLoginAttempts,
@@ -40,6 +40,10 @@ interface AttachmentSummary {
   content_id: string | null;
   disposition: string | null;
   created_at: string;
+}
+
+interface AttachmentStorageRow {
+  storage_key: string;
 }
 
 interface PreparedSendAttachment extends SendAttachment {
@@ -178,6 +182,49 @@ async function listAttachmentsByOwner(
     .all();
 
   return (rows.results ?? []) as unknown as AttachmentSummary[];
+}
+
+async function listAttachmentStorageKeysByOwner(
+  c: Context<AppBindings>,
+  userId: number,
+  ownerColumn: AttachmentOwnerColumn,
+  ownerId: number
+): Promise<string[]> {
+  const rows = await c.env.DB.prepare(
+    `
+      SELECT storage_key
+      FROM attachments
+      WHERE user_id = ? AND ${ownerColumn} = ?
+    `
+  )
+    .bind(userId, ownerId)
+    .all<AttachmentStorageRow>();
+
+  return (rows.results ?? []).map((row) => String(row.storage_key || '')).filter((key) => key.length > 0);
+}
+
+async function deleteAttachmentObjects(c: Context<AppBindings>, storageKeys: string[]): Promise<void> {
+  for (const key of storageKeys) {
+    try {
+      await c.env.ATTACHMENTS.delete(key);
+    } catch (err) {
+      console.error(`Failed to cleanup attachment object ${key}:`, err);
+    }
+  }
+}
+
+async function deleteAttachmentsByOwner(
+  c: Context<AppBindings>,
+  userId: number,
+  ownerColumn: AttachmentOwnerColumn,
+  ownerId: number
+): Promise<void> {
+  const storageKeys = await listAttachmentStorageKeysByOwner(c, userId, ownerColumn, ownerId);
+  await deleteAttachmentObjects(c, storageKeys);
+
+  await c.env.DB.prepare(`DELETE FROM attachments WHERE user_id = ? AND ${ownerColumn} = ?`)
+    .bind(userId, ownerId)
+    .run();
 }
 
 const app = new Hono<AppBindings>();
@@ -468,8 +515,81 @@ api.delete('/emails/:id', async (c) => {
     return c.json({ error: 'Invalid email id' }, 400);
   }
 
+  const email = await c.env.DB.prepare('SELECT id, folder FROM emails WHERE id = ? AND user_id = ?')
+    .bind(emailId, user.id)
+    .first<{ id: number; folder: string }>();
+
+  if (!email) {
+    return c.json({ error: 'Not found' }, 404);
+  }
+
+  const hardDeleteQuery = (c.req.query('hard') ?? '').trim().toLowerCase();
+  const hardDelete = hardDeleteQuery === '1' || hardDeleteQuery === 'true';
+
+  if (hardDelete) {
+    if (email.folder !== 'trash') {
+      return c.json({ error: 'Only trash emails can be permanently deleted' }, 400);
+    }
+
+    await deleteAttachmentsByOwner(c, user.id, 'email_id', emailId);
+    await c.env.DB.prepare('DELETE FROM emails WHERE id = ? AND user_id = ?')
+      .bind(emailId, user.id)
+      .run();
+
+    return c.json({ ok: true, mode: 'permanent' });
+  }
+
   await c.env.DB.prepare("UPDATE emails SET folder = 'trash' WHERE id = ? AND user_id = ?")
     .bind(emailId, user.id)
+    .run();
+
+  return c.json({ ok: true, mode: 'trash' });
+});
+
+api.post('/emails/:id/restore', async (c) => {
+  const user = c.get('user');
+  const emailId = parseNumericId(c.req.param('id'));
+  if (emailId === null) {
+    return c.json({ error: 'Invalid email id' }, 400);
+  }
+
+  const email = await c.env.DB.prepare('SELECT id, folder FROM emails WHERE id = ? AND user_id = ?')
+    .bind(emailId, user.id)
+    .first<{ id: number; folder: string }>();
+
+  if (!email) {
+    return c.json({ error: 'Not found' }, 404);
+  }
+
+  if (email.folder !== 'trash') {
+    return c.json({ error: 'Only trash emails can be restored' }, 400);
+  }
+
+  await c.env.DB.prepare("UPDATE emails SET folder = 'inbox' WHERE id = ? AND user_id = ?")
+    .bind(emailId, user.id)
+    .run();
+
+  return c.json({ ok: true });
+});
+
+api.delete('/sent/:id', async (c) => {
+  const user = c.get('user');
+  const sentId = parseNumericId(c.req.param('id'));
+  if (sentId === null) {
+    return c.json({ error: 'Invalid sent email id' }, 400);
+  }
+
+  const sent = await c.env.DB.prepare('SELECT id FROM sent_emails WHERE id = ? AND user_id = ?')
+    .bind(sentId, user.id)
+    .first<{ id: number }>();
+
+  if (!sent) {
+    return c.json({ error: 'Not found' }, 404);
+  }
+
+  await deleteAttachmentsByOwner(c, user.id, 'sent_email_id', sentId);
+  await c.env.DB.prepare('DELETE FROM sent_emails WHERE id = ? AND user_id = ?')
+    .bind(sentId, user.id)
     .run();
 
   return c.json({ ok: true });
