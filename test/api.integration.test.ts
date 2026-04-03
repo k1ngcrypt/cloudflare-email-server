@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:test';
 import type { Env } from '../src/index';
 import {
+  addUserEmailAddress,
   apiRequest,
   createAuthenticatedSession,
   login,
@@ -129,9 +130,10 @@ describe('worker HTTP API integration', () => {
     expect(meResponse.status).toBe(200);
     expect(meResponse.headers.get('access-control-allow-origin')).toBe('https://webmail.test');
 
-    const meBody = await readJson<{ username: string; email: string }>(meResponse);
+    const meBody = await readJson<{ username: string; email: string; emails: string[] }>(meResponse);
     expect(meBody.username).toBe(user.username);
     expect(meBody.email).toBe(user.email);
+    expect(meBody.emails).toContain(user.email);
 
     const logoutResponse = await apiRequest('/api/logout', {
       method: 'POST',
@@ -682,6 +684,88 @@ describe('worker HTTP API integration', () => {
 
     expect(dataUrlWithoutPayload.status).toBe(400);
     expect((await readJson<{ error: string }>(dataUrlWithoutPayload)).error).toContain('has no content');
+  });
+
+  it('returns account address aliases from /api/me and validates selected from address ownership', async () => {
+    const session = await createAuthenticatedSession({
+      username: 'multi-address-composer',
+      email: 'primary-compose@mail.example.test',
+      password: 'Compose-Multi-Pass-123',
+    });
+
+    await addUserEmailAddress(session.id, 'alias-compose@mail.example.test');
+
+    const meResponse = await apiRequest('/api/me', {
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+      },
+    });
+
+    expect(meResponse.status).toBe(200);
+    const meBody = await readJson<{ email: string; emails: string[] }>(meResponse);
+    expect(meBody.email).toBe('primary-compose@mail.example.test');
+    expect(meBody.emails).toEqual([
+      'primary-compose@mail.example.test',
+      'alias-compose@mail.example.test',
+    ]);
+
+    const unauthorizedFromResponse = await apiRequest('/api/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: 'attacker@example.net',
+        to: 'recipient@example.net',
+        subject: 'Unauthorized From',
+        text: 'Body',
+      }),
+    });
+
+    expect(unauthorizedFromResponse.status).toBe(403);
+    expect((await readJson<{ error: string }>(unauthorizedFromResponse)).error).toContain(
+      'not assigned to this account'
+    );
+
+    const malformedFromResponse = await apiRequest('/api/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: 'not-an-email',
+        to: 'recipient@example.net',
+        subject: 'Malformed From',
+        text: 'Body',
+      }),
+    });
+
+    expect(malformedFromResponse.status).toBe(400);
+    expect((await readJson<{ error: string }>(malformedFromResponse)).error).toContain(
+      'from must be a valid email address'
+    );
+
+    const authorizedAliasResponse = await apiRequest('/api/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: 'alias-compose@mail.example.test',
+        to: 'recipient@example.net',
+        subject: 'Authorized From',
+        text: 'Body',
+        attachments: [null],
+      }),
+    });
+
+    expect(authorizedAliasResponse.status).toBe(400);
+    expect((await readJson<{ error: string }>(authorizedAliasResponse)).error).toContain(
+      'Invalid attachment at index 0'
+    );
   });
 
   it('returns not found for unknown authenticated routes', async () => {

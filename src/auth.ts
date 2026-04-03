@@ -1,5 +1,6 @@
 import { argon2id } from '@noble/hashes/argon2.js';
 import type { Env } from './index';
+import { getPrimaryUserEmailAddress } from './user-addresses';
 
 const TOKEN_COOKIE_NAME = 'session_token';
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
@@ -275,7 +276,7 @@ export async function authenticate(
 
   const session = await env.DB.prepare(
     `
-      SELECT users.id, users.email, users.username
+      SELECT users.id, users.email AS legacy_email, users.username
       FROM sessions
       JOIN users ON sessions.user_id = users.id
       WHERE sessions.token = ?
@@ -283,9 +284,22 @@ export async function authenticate(
     `
   )
     .bind(tokenHash, now)
-    .first<{ id: number; email: string; username: string }>();
+    .first<{ id: number; legacy_email: string; username: string }>();
 
-  return session ?? null;
+  if (!session) {
+    return null;
+  }
+
+  const email = await getPrimaryUserEmailAddress(env, session.id, session.legacy_email);
+  if (!email) {
+    return null;
+  }
+
+  return {
+    id: session.id,
+    email,
+    username: session.username,
+  };
 }
 
 export async function isLoginBlocked(

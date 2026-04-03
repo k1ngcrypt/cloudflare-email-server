@@ -3,7 +3,7 @@ import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import worker from '../src/index.ts';
 import { handleIncomingEmail } from '../src/inbound.ts';
 import type { Env } from '../src/index';
-import { getBindings, resetState, seedLegacyUser } from './helpers';
+import { addUserEmailAddress, getBindings, resetState, seedLegacyUser } from './helpers';
 
 function buildPlainTextMime(toAddress: string): string {
   return [
@@ -133,6 +133,36 @@ describe('inbound email handler integration', () => {
       .DB.prepare('SELECT COUNT(*) AS count FROM emails')
       .first<{ count: number }>();
     expect(emailCount?.count ?? 0).toBe(0);
+  });
+
+  it('routes inbound mail addressed to a user alias', async () => {
+    const user = await seedLegacyUser({
+      username: 'alias-recipient-user',
+      email: 'primary-alias@mail.example.test',
+      password: 'Alias-Inbound-Pass-123',
+    });
+
+    await addUserEmailAddress(user.id, 'support-alias@mail.example.test');
+
+    const envelopeTo = 'SUPPORT-ALIAS@MAIL.EXAMPLE.TEST';
+    const { message, rejections } = createForwardableEmailMessage(
+      buildPlainTextMime(envelopeTo),
+      envelopeTo
+    );
+
+    const ctx = createExecutionContext();
+    await worker.email(message, getBindings(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(rejections).toHaveLength(0);
+
+    const emailRow = await getBindings()
+      .DB.prepare('SELECT user_id, to_address FROM emails WHERE user_id = ? LIMIT 1')
+      .bind(user.id)
+      .first<{ user_id: number; to_address: string }>();
+
+    expect(emailRow?.user_id).toBe(user.id);
+    expect(emailRow?.to_address).toBe('support-alias@mail.example.test');
   });
 
   it('stores parsed inbound email and attachment metadata in D1 and R2', async () => {

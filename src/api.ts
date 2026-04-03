@@ -26,6 +26,11 @@ import {
   sanitizeFilename,
 } from './attachment-utils';
 import { sendEmail, type SendAttachment } from './send';
+import {
+  isValidEmailAddress,
+  listUserEmailAddresses,
+  normalizeEmailAddress,
+} from './user-addresses';
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -71,6 +76,7 @@ const loginBodySchema = z.object({
 });
 
 const sendBodySchema = z.object({
+  from: z.string().optional(),
   to: z.string(),
   subject: z.string(),
   text: z.string(),
@@ -162,6 +168,47 @@ async function failedLoginResponse(c: Context<AppBindings>, throttleKey: string)
   }
 
   return c.json({ error: 'Invalid credentials' }, 401);
+}
+
+async function resolveUserAddressSet(
+  env: Env,
+  userId: number,
+  fallbackEmail?: string | null
+): Promise<{ primaryEmail: string; emails: string[] }> {
+  const normalizedFallback =
+    typeof fallbackEmail === 'string' && fallbackEmail.trim().length > 0
+      ? normalizeEmailAddress(fallbackEmail)
+      : '';
+
+  const fromTable = await listUserEmailAddresses(env, userId, fallbackEmail);
+  const candidates = [...fromTable];
+
+  if (normalizedFallback.length > 0) {
+    candidates.push(normalizedFallback);
+  }
+
+  const emails: string[] = [];
+  const seen = new Set<string>();
+
+  for (const address of candidates) {
+    const normalized = normalizeEmailAddress(address);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    emails.push(normalized);
+  }
+
+  const primaryEmail = emails[0] ?? '';
+  if (!primaryEmail) {
+    throw new Error(`User ${userId} has no email addresses configured`);
+  }
+
+  return {
+    primaryEmail,
+    emails,
+  };
 }
 
 async function listAttachmentsByOwner(
@@ -341,7 +388,14 @@ api.post(
     secure: true,
   });
 
-  return c.json({ token: session.token, email: user.email, expiresAt: session.expiresAt });
+  const userAddressSet = await resolveUserAddressSet(c.env, user.id, user.email);
+
+  return c.json({
+    token: session.token,
+    email: userAddressSet.primaryEmail,
+    emails: userAddressSet.emails,
+    expiresAt: session.expiresAt,
+  });
 });
 
 api.post('/logout', async (c) => {
@@ -368,9 +422,16 @@ const requireAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
 
 api.use('*', requireAuth);
 
-api.get('/me', (c) => {
+api.get('/me', async (c) => {
   const user = c.get('user');
-  return c.json({ id: user.id, email: user.email, username: user.username });
+  const userAddressSet = await resolveUserAddressSet(c.env, user.id, user.email);
+
+  return c.json({
+    id: user.id,
+    email: userAddressSet.primaryEmail,
+    emails: userAddressSet.emails,
+    username: user.username,
+  });
 });
 
 api.get('/attachments/:id/download', async (c) => {
@@ -610,6 +671,23 @@ api.post(
     return c.json({ error: 'to, subject, and text are required' }, 400);
   }
 
+  const userAddressSet = await resolveUserAddressSet(c.env, user.id, user.email);
+  let fromAddress = userAddressSet.primaryEmail;
+
+  if (typeof body.from === 'string' && body.from.trim().length > 0) {
+    const normalizedFrom = normalizeEmailAddress(body.from);
+
+    if (!isValidEmailAddress(normalizedFrom)) {
+      return c.json({ error: 'from must be a valid email address' }, 400);
+    }
+
+    if (!userAddressSet.emails.includes(normalizedFrom)) {
+      return c.json({ error: 'from address is not assigned to this account' }, 403);
+    }
+
+    fromAddress = normalizedFrom;
+  }
+
   if (body.attachments !== undefined && !Array.isArray(body.attachments)) {
     return c.json({ error: 'attachments must be an array' }, 400);
   }
@@ -707,7 +785,7 @@ api.post(
     }
 
     await sendEmail(c.env, {
-      from: user.email,
+      from: fromAddress,
       to: body.to,
       subject: body.subject,
       text: body.text,
@@ -719,7 +797,7 @@ api.post(
       })),
     });
 
-    return c.json({ ok: true, sentEmailId });
+    return c.json({ ok: true, sentEmailId, from: fromAddress });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('Send failed:', err);

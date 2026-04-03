@@ -1,6 +1,7 @@
 import PostalMime from 'postal-mime';
 import type { Env } from './index';
 import { sanitizeFilename } from './attachment-utils';
+import { findUserIdByEmailAddress, normalizeEmailAddress } from './user-addresses';
 
 const MAX_INBOUND_ATTACHMENT_COUNT = 25;
 const MAX_INBOUND_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -35,13 +36,11 @@ export async function handleIncomingEmail(
 
   try {
     const parsed = await PostalMime.parse(message.raw);
-    const toAddress = message.to.toLowerCase().trim();
+    const toAddress = normalizeEmailAddress(message.to);
 
-    const user = await env.DB.prepare('SELECT id FROM users WHERE email = ?')
-      .bind(toAddress)
-      .first<{ id: number }>();
+    const userId = await findUserIdByEmailAddress(env, toAddress);
 
-    if (!user) {
+    if (!userId) {
       message.setReject(`No mailbox for ${toAddress}`);
       return;
     }
@@ -89,7 +88,7 @@ export async function handleIncomingEmail(
       `
     )
       .bind(
-        user.id,
+        userId,
         msgId,
         fromAddr,
         fromName,
@@ -119,7 +118,7 @@ export async function handleIncomingEmail(
         typeof attachment.mimeType === 'string' && attachment.mimeType.trim().length > 0
           ? attachment.mimeType
           : 'application/octet-stream';
-      const storageKey = buildStorageKey(user.id, emailId, filename);
+      const storageKey = buildStorageKey(userId, emailId, filename);
 
       await env.ATTACHMENTS.put(storageKey, content, {
         httpMetadata: { contentType: mimeType },
@@ -135,7 +134,7 @@ export async function handleIncomingEmail(
         `
       )
         .bind(
-          user.id,
+          userId,
           emailId,
           storageKey,
           filename,

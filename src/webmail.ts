@@ -380,7 +380,8 @@ export function getWebmailHtml(): string {
     }
 
     .compose-body input,
-    .compose-body textarea {
+    .compose-body textarea,
+    .compose-body select {
       width: 100%;
       border: 1px solid #d4dee9;
       border-radius: 8px;
@@ -394,6 +395,22 @@ export function getWebmailHtml(): string {
     .compose-body textarea {
       min-height: 130px;
       resize: vertical;
+    }
+
+    .compose-from-row {
+      align-items: center;
+      gap: 10px;
+    }
+
+    .compose-from-row label {
+      font-size: 12px;
+      color: #5f7388;
+      min-width: 42px;
+    }
+
+    .compose-from-row select {
+      flex: 1;
+      min-width: 0;
     }
 
     .compose-file-hint {
@@ -597,6 +614,10 @@ export function getWebmailHtml(): string {
   <div class="compose-body">
     <input id="composeTo" type="text" placeholder="To" />
     <input id="composeSubject" type="text" placeholder="Subject" />
+    <div class="compose-row compose-from-row">
+      <label for="composeFrom">From</label>
+      <select id="composeFrom"></select>
+    </div>
     <textarea id="composeBody" placeholder="Write your message..."></textarea>
     <input id="composeFiles" type="file" multiple />
     <div class="compose-file-hint">Attach up to 10 files, max 20 MB total. Drafts store To/Subject/Body text only.</div>
@@ -617,10 +638,100 @@ export function getWebmailHtml(): string {
   let currentListItems = [];
   let viewerContext = null;
   let draftAutosaveTimer = null;
+  let availableSenderAddresses = [];
+  let activeSenderAddress = '';
   const DRAFTS_KEY = 'webmail.local-drafts.v1';
 
   function byId(id) {
     return document.getElementById(id);
+  }
+
+  function normalizeAddress(value) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  function deriveSenderAddresses(payload) {
+    const candidates = [];
+
+    if (payload && Array.isArray(payload.emails)) {
+      for (const value of payload.emails) {
+        const normalized = normalizeAddress(value);
+        if (normalized) {
+          candidates.push(normalized);
+        }
+      }
+    }
+
+    const primary = payload && typeof payload.email === 'string' ? normalizeAddress(payload.email) : '';
+    if (primary) {
+      candidates.unshift(primary);
+    }
+
+    const deduped = [];
+    const seen = new Set();
+    for (const address of candidates) {
+      if (!seen.has(address)) {
+        seen.add(address);
+        deduped.push(address);
+      }
+    }
+
+    return deduped;
+  }
+
+  function renderFromAddressOptions() {
+    const select = byId('composeFrom');
+    if (!select) return;
+
+    select.innerHTML = '';
+
+    if (!availableSenderAddresses.length) {
+      const emptyOption = document.createElement('option');
+      emptyOption.value = '';
+      emptyOption.textContent = '(no sender address)';
+      select.appendChild(emptyOption);
+      select.disabled = true;
+      return;
+    }
+
+    if (!availableSenderAddresses.includes(activeSenderAddress)) {
+      activeSenderAddress = availableSenderAddresses[0];
+    }
+
+    for (const address of availableSenderAddresses) {
+      const option = document.createElement('option');
+      option.value = address;
+      option.textContent = address;
+      option.selected = address === activeSenderAddress;
+      select.appendChild(option);
+    }
+
+    select.disabled = false;
+    select.value = activeSenderAddress;
+  }
+
+  function setSenderAddressesFromPayload(payload) {
+    availableSenderAddresses = deriveSenderAddresses(payload);
+
+    if (!availableSenderAddresses.length) {
+      activeSenderAddress = '';
+    } else if (!availableSenderAddresses.includes(activeSenderAddress)) {
+      activeSenderAddress = availableSenderAddresses[0];
+    }
+
+    renderFromAddressOptions();
+  }
+
+  function selectedFromAddress() {
+    const select = byId('composeFrom');
+    if (select && !select.disabled) {
+      const normalized = normalizeAddress(select.value);
+      if (normalized) {
+        activeSenderAddress = normalized;
+      }
+    }
+
+    return activeSenderAddress;
   }
 
   function folderTitle(folder) {
@@ -811,6 +922,7 @@ export function getWebmailHtml(): string {
     const compose = byId('compose');
     if (!compose) return;
     compose.style.display = 'block';
+    renderFromAddressOptions();
     renderComposeTag();
   }
 
@@ -1524,6 +1636,7 @@ export function getWebmailHtml(): string {
     const to = toInput ? String(toInput.value || '').trim() : '';
     const subject = subjectInput ? String(subjectInput.value || '').trim() : '';
     const text = bodyInput ? String(bodyInput.value || '').trim() : '';
+    const from = selectedFromAddress();
 
     const files = filesInput && filesInput.files ? Array.from(filesInput.files) : [];
     const attachments = [];
@@ -1546,7 +1659,12 @@ export function getWebmailHtml(): string {
     }
 
     setSendStatus('Sending...', false);
-    const res = await apiFetch('/api/send', 'POST', { to, subject, text, attachments });
+    const payload = { to, subject, text, attachments };
+    if (from) {
+      payload.from = from;
+    }
+
+    const res = await apiFetch('/api/send', 'POST', payload);
 
     if (res.status === 401) {
       logout();
@@ -1628,6 +1746,8 @@ export function getWebmailHtml(): string {
       loginError.textContent = '';
     }
 
+    setSenderAddressesFromPayload(data);
+
     showApp();
   }
 
@@ -1642,6 +1762,7 @@ export function getWebmailHtml(): string {
     selectedEmailId = null;
     selectedDraftId = null;
     viewerContext = null;
+    setSenderAddressesFromPayload({});
     showLogin();
   }
 
@@ -1665,11 +1786,15 @@ export function getWebmailHtml(): string {
   async function bootstrapSession() {
     renderDraftCount();
     const res = await apiFetch('/api/me');
+    const data = await res.json().catch(() => ({}));
+
     if (res.ok) {
+      setSenderAddressesFromPayload(data);
       showApp();
       return;
     }
 
+    setSenderAddressesFromPayload({});
     showLogin();
   }
 
@@ -1728,6 +1853,13 @@ export function getWebmailHtml(): string {
     if (sendBtn) {
       sendBtn.addEventListener('click', () => {
         doSend();
+      });
+    }
+
+    const composeFrom = byId('composeFrom');
+    if (composeFrom) {
+      composeFrom.addEventListener('change', () => {
+        selectedFromAddress();
       });
     }
 

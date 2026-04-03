@@ -1,0 +1,24 @@
+name = "cloudflare-webmail-test"
+main = "src/index.ts"
+compatibility_date = "2025-10-11"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "webmail-db-test"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "webmail-attachments-test"
+preview_bucket_name = "webmail-attachments-test"
+
+[vars]
+FROM_DOMAIN = "mail.example.test"
+OCI_EMAIL_ENDPOINT = "https://cell0.submit.email.ca-montreal-1.oci.oraclecloud.com"
+OCI_EMAIL_COMPARTMENT_OCID = "ocid1.compartment.oc1..test"
+OCI_EMAIL_API_TENANCY_OCID = "ocid1.tenancy.oc1..test"
+OCI_EMAIL_API_USER_OCID = "ocid1.user.oc1..test"
+OCI_EMAIL_API_KEY_FINGERPRINT = "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00"
+OCI_EMAIL_API_PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\\nTEST\\n-----END PRIVATE KEY-----"
+AUTH_SECRET = "test-auth-secret"

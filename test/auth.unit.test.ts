@@ -12,7 +12,7 @@ import {
   revokeSession,
   verifyPasswordAndUpgrade,
 } from '../src/auth';
-import { resetState, seedLegacyUser } from './helpers';
+import { addUserEmailAddress, resetState, seedLegacyUser } from './helpers';
 
 function bindings(): Env {
   return env as unknown as Env;
@@ -49,12 +49,7 @@ describe('auth helper behavior', () => {
 
     expect(before?.password_hash).toMatch(/^[a-f0-9]{64}$/);
 
-    const verified = await verifyPasswordAndUpgrade(
-      bindings(),
-      user.id,
-      user.password,
-      before?.password_hash as string
-    );
+    const verified = await verifyPasswordAndUpgrade(bindings(), user.id, user.password, before?.password_hash as string);
 
     expect(verified).toBe(true);
 
@@ -103,6 +98,27 @@ describe('auth helper behavior', () => {
 
     const afterRevoke = await authenticate(bearerRequest, bindings());
     expect(afterRevoke).toBeNull();
+  });
+
+  it('authenticates with the account primary address from user_addresses', async () => {
+    const user = await seedLegacyUser({
+      username: 'multi-address-auth-user',
+      email: 'primary-auth@mail.example.test',
+      password: 'Multi-Auth-Pass-123',
+    });
+
+    await addUserEmailAddress(user.id, 'alias-auth@mail.example.test');
+    await addUserEmailAddress(user.id, 'new-primary-auth@mail.example.test', { isPrimary: true });
+
+    const session = await createSession(bindings(), user.id);
+    const request = new Request('https://webmail.test/api/me', {
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+      },
+    });
+
+    const authenticated = await authenticate(request, bindings());
+    expect(authenticated?.email).toBe('new-primary-auth@mail.example.test');
   });
 
   it('rejects sessions that have already expired', async () => {

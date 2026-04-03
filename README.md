@@ -11,7 +11,7 @@ Cloudflare Worker webmail server unifying all documentation.
                    │  postal-mime parses raw MIME
                    ▼
             [D1 Database + R2 Bucket]
-           emails / attachments / users / sessions
+           emails / attachments / users / user_addresses / sessions
                    │
                    ▼
          [Worker: fetch() HTTP handler]
@@ -45,6 +45,7 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 2. Create D1 DB and update `wrangler.toml` with your `database_id`.
 3. Create an R2 bucket for attachments and keep the bucket name aligned with `wrangler.toml` (`webmail-attachments` by default).
 4. Apply `schema.sql`: `npm run db:migrate` or `wrangler d1 execute webmail-db --file=./schema.sql`
+      - For production D1, run: `wrangler d1 execute webmail-db --remote --file=./schema.sql`
 5. Set secrets with Wrangler:
       - `OCI_EMAIL_API_TENANCY_OCID`
       - `OCI_EMAIL_API_USER_OCID`
@@ -58,6 +59,7 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 ## Security Notes
 
 - Passwords are stored using `argon2id` hashes (legacy SHA-256 hashes are upgraded automatically on successful login).
+- Accounts can own multiple email addresses in `user_addresses`; `users.email` remains as the legacy primary address for compatibility.
 - API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.
 - Login attempts are throttled per `client-ip + username` key (`login_attempts` table in `schema.sql`).
 - If this project was already deployed before this update, re-run `npm run db:migrate` to create the new table/indexes.
@@ -70,6 +72,21 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 - `npm run deploy` (deploy to CF)
 - `npm run db:create` (create DB)
 - `npm run db:migrate` (migrate DB schema)
+
+## Managing Account Addresses
+
+Assign additional addresses to an existing account (replace values as needed):
+
+```sql
+INSERT INTO user_addresses (user_id, address, is_primary)
+VALUES (42, 'support@example.com', 0);
+```
+
+Set an address as primary for an account:
+
+```sql
+UPDATE users SET email = 'support@example.com' WHERE id = 42;
+```
 
 ## OCI (Oracle Cloud) Setup (One-time)
 
