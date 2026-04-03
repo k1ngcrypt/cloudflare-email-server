@@ -2,6 +2,8 @@ import type { Env } from './index';
 
 const OCI_CONTROL_API_VERSION_PATH = '/20170907';
 const JSON_CONTENT_TYPE = 'application/json';
+const LIST_SENDERS_PAGE_SIZE = 100;
+const LIST_SENDERS_MAX_PAGES = 50;
 
 const SIGNED_HEADERS_NO_BODY = ['(request-target)', 'host', 'x-date'] as const;
 const SIGNED_HEADERS_WITH_BODY = [
@@ -21,6 +23,16 @@ interface SenderSummary {
 
 interface ListSendersResponseBody {
   items?: SenderSummary[];
+}
+
+interface ListSendersPageOptions {
+  emailAddress?: string;
+  page?: string;
+}
+
+interface ListSendersPageResult {
+  items: SenderSummary[];
+  nextPage: string | null;
 }
 
 export class ApprovedSenderSyncError extends Error {
@@ -213,7 +225,7 @@ async function requestOciEmailControlPlane(
   options: {
     method: 'GET' | 'POST' | 'DELETE';
     path: string;
-    query?: Record<string, string | number | undefined>;
+    query?: Record<string, string | number | boolean | undefined>;
     body?: unknown;
   }
 ): Promise<Response> {
@@ -280,15 +292,23 @@ async function readOciError(response: Response): Promise<string> {
   return trimmed;
 }
 
-async function findApprovedSenderByEmail(env: Env, emailAddress: string): Promise<SenderSummary | null> {
-  const normalized = normalizeEmailAddress(emailAddress);
+function isSenderDeleted(lifecycleState: string | undefined): boolean {
+  const lifecycle = String(lifecycleState ?? '').toUpperCase();
+  return lifecycle === 'DELETED' || lifecycle === 'DELETING';
+}
+
+async function listSendersPage(
+  env: Env,
+  options: ListSendersPageOptions
+): Promise<ListSendersPageResult> {
   const response = await requestOciEmailControlPlane(env, {
     method: 'GET',
     path: '/senders',
     query: {
       compartmentId: env.OCI_EMAIL_COMPARTMENT_OCID,
-      emailAddress: normalized,
-      limit: 20,
+      emailAddress: options.emailAddress,
+      page: options.page,
+      limit: LIST_SENDERS_PAGE_SIZE,
     },
   });
 
@@ -299,16 +319,64 @@ async function findApprovedSenderByEmail(env: Env, emailAddress: string): Promis
 
   const payload = (await response.json().catch(() => ({}))) as ListSendersResponseBody;
   const items = Array.isArray(payload.items) ? payload.items : [];
+  const nextPage = response.headers.get('opc-next-page');
 
-  for (const item of items) {
-    const itemEmail = normalizeEmailAddress(String(item.emailAddress ?? ''));
-    const lifecycle = String(item.lifecycleState ?? '').toUpperCase();
-    if (itemEmail === normalized && lifecycle !== 'DELETED') {
+  return {
+    items,
+    nextPage: nextPage && nextPage.trim().length > 0 ? nextPage : null,
+  };
+}
+
+async function findApprovedSenderInPages(
+  env: Env,
+  normalizedEmailAddress: string,
+  options: { emailFilter?: string }
+): Promise<SenderSummary | null> {
+  const seenPages = new Set<string>();
+  let page: string | undefined;
+
+  for (let pageCount = 0; pageCount < LIST_SENDERS_MAX_PAGES; pageCount += 1) {
+    const pageResult = await listSendersPage(env, {
+      emailAddress: options.emailFilter,
+      page,
+    });
+
+    for (const item of pageResult.items) {
+      const itemEmail = normalizeEmailAddress(String(item.emailAddress ?? ''));
+      if (itemEmail !== normalizedEmailAddress || isSenderDeleted(item.lifecycleState)) {
+        continue;
+      }
+
       return item;
     }
+
+    if (!pageResult.nextPage || seenPages.has(pageResult.nextPage)) {
+      break;
+    }
+
+    seenPages.add(pageResult.nextPage);
+    page = pageResult.nextPage;
   }
 
   return null;
+}
+
+async function findApprovedSenderByEmail(env: Env, emailAddress: string): Promise<SenderSummary | null> {
+  const normalized = normalizeEmailAddress(emailAddress);
+  if (!normalized) {
+    return null;
+  }
+
+  const filteredMatch = await findApprovedSenderInPages(env, normalized, {
+    emailFilter: normalized,
+  });
+  if (filteredMatch) {
+    return filteredMatch;
+  }
+
+  // Some OCI tenancies can return incomplete filtered results; fall back to
+  // scanning pages without an email filter before concluding the sender is absent.
+  return findApprovedSenderInPages(env, normalized, {});
 }
 
 async function ensureApprovedSender(env: Env, emailAddress: string): Promise<boolean> {
@@ -352,6 +420,9 @@ async function removeApprovedSender(env: Env, emailAddress: string): Promise<voi
   const response = await requestOciEmailControlPlane(env, {
     method: 'DELETE',
     path: `/senders/${encodeURIComponent(sender.id)}`,
+    query: {
+      isLockOverride: true,
+    },
   });
 
   if (response.ok || response.status === 404) {
