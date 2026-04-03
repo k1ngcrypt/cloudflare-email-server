@@ -580,6 +580,7 @@ export function getWebmailHtml(): string {
     <button class="folder-btn" data-folder="trash" id="folderTrashBtn"><span>Trash</span></button>
     <div style="flex:1;"></div>
     <button class="btn btn-primary" id="composeOpenBtn" style="width:100%;">Compose</button>
+    <button class="folder-btn" id="adminConsoleBtn" style="margin-top:6px;display:none;"><span>Admin Console</span></button>
     <button class="folder-btn" id="logoutBtn" style="margin-top:6px;"><span>Sign Out</span></button>
   </div>
 
@@ -640,6 +641,7 @@ export function getWebmailHtml(): string {
   let draftAutosaveTimer = null;
   let availableSenderAddresses = [];
   let activeSenderAddress = '';
+  let currentUserRole = 'user';
   const DRAFTS_KEY = 'webmail.local-drafts.v1';
 
   function byId(id) {
@@ -732,6 +734,15 @@ export function getWebmailHtml(): string {
     }
 
     return activeSenderAddress;
+  }
+
+  function setCurrentUserRole(role) {
+    currentUserRole = String(role || '').toLowerCase() === 'admin' ? 'admin' : 'user';
+
+    const adminConsoleBtn = byId('adminConsoleBtn');
+    if (adminConsoleBtn) {
+      adminConsoleBtn.style.display = currentUserRole === 'admin' ? 'inline-flex' : 'none';
+    }
   }
 
   function folderTitle(folder) {
@@ -1747,6 +1758,7 @@ export function getWebmailHtml(): string {
     }
 
     setSenderAddressesFromPayload(data);
+    setCurrentUserRole(data.role);
 
     showApp();
   }
@@ -1763,6 +1775,7 @@ export function getWebmailHtml(): string {
     selectedDraftId = null;
     viewerContext = null;
     setSenderAddressesFromPayload({});
+    setCurrentUserRole('user');
     showLogin();
   }
 
@@ -1790,11 +1803,13 @@ export function getWebmailHtml(): string {
 
     if (res.ok) {
       setSenderAddressesFromPayload(data);
+      setCurrentUserRole(data.role);
       showApp();
       return;
     }
 
     setSenderAddressesFromPayload({});
+    setCurrentUserRole('user');
     showLogin();
   }
 
@@ -1818,6 +1833,13 @@ export function getWebmailHtml(): string {
     if (composeOpenBtn) {
       composeOpenBtn.addEventListener('click', () => {
         beginNewCompose();
+      });
+    }
+
+    const adminConsoleBtn = byId('adminConsoleBtn');
+    if (adminConsoleBtn) {
+      adminConsoleBtn.addEventListener('click', () => {
+        window.location.href = '/admin';
       });
     }
 

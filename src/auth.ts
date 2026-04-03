@@ -267,7 +267,7 @@ export async function revokeSession(request: Request, env: Env): Promise<void> {
 export async function authenticate(
   request: Request,
   env: Env
-): Promise<{ id: number; email: string; username: string } | null> {
+): Promise<{ id: number; email: string; username: string; role: 'admin' | 'user' } | null> {
   const token = extractSessionToken(request);
   if (!token) return null;
 
@@ -276,15 +276,16 @@ export async function authenticate(
 
   const session = await env.DB.prepare(
     `
-      SELECT users.id, users.email AS legacy_email, users.username
+      SELECT users.id, users.email AS legacy_email, users.username, COALESCE(user_roles.role, 'user') AS role
       FROM sessions
       JOIN users ON sessions.user_id = users.id
+      LEFT JOIN user_roles ON user_roles.user_id = users.id
       WHERE sessions.token = ?
         AND sessions.expires_at > ?
     `
   )
     .bind(tokenHash, now)
-    .first<{ id: number; legacy_email: string; username: string }>();
+    .first<{ id: number; legacy_email: string; username: string; role: string }>();
 
   if (!session) {
     return null;
@@ -299,6 +300,7 @@ export async function authenticate(
     id: session.id,
     email,
     username: session.username,
+    role: session.role === 'admin' ? 'admin' : 'user',
   };
 }
 

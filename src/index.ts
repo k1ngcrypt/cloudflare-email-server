@@ -7,6 +7,7 @@ export interface Env {
   FROM_DOMAIN: string;
   APP_ORIGIN?: string;
   OCI_EMAIL_ENDPOINT: string;
+  OCI_EMAIL_CONTROL_ENDPOINT?: string;
   OCI_EMAIL_COMPARTMENT_OCID: string;
   OCI_EMAIL_API_TENANCY_OCID: string;
   OCI_EMAIL_API_USER_OCID: string;

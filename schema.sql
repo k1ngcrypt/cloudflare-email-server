@@ -8,6 +8,44 @@ CREATE TABLE IF NOT EXISTS users (
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- RBAC role assignment per user.
+CREATE TABLE IF NOT EXISTS user_roles (
+  user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  role          TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Backfill role rows for pre-existing users.
+INSERT OR IGNORE INTO user_roles (user_id, role)
+SELECT id, 'user'
+FROM users;
+
+-- Ensure there is always at least one admin after migration bootstrap.
+UPDATE user_roles
+SET role = 'admin', updated_at = datetime('now')
+WHERE user_id = (
+  SELECT id
+  FROM users
+  ORDER BY id ASC
+  LIMIT 1
+)
+AND (SELECT COUNT(*) FROM user_roles WHERE role = 'admin') = 0;
+
+-- New users get a default role. First account becomes admin automatically.
+CREATE TRIGGER IF NOT EXISTS trg_users_insert_default_role
+AFTER INSERT ON users
+WHEN NOT EXISTS (SELECT 1 FROM user_roles WHERE user_id = NEW.id)
+BEGIN
+  INSERT INTO user_roles (user_id, role)
+  VALUES (
+    NEW.id,
+    CASE
+      WHEN (SELECT COUNT(*) FROM user_roles WHERE role = 'admin') = 0 THEN 'admin'
+      ELSE 'user'
+    END
+  );
+END;
+
 -- User address aliases: one user can own multiple inbound/outbound email addresses.
 CREATE TABLE IF NOT EXISTS user_addresses (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,6 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_login_attempts_blocked ON login_attempts(blocked_
 CREATE INDEX IF NOT EXISTS idx_sent_user_time ON sent_emails(user_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_user ON user_addresses(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_address ON user_addresses(address);
+CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role);
 DROP INDEX IF EXISTS idx_user_addresses_single_primary;
 CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_sent ON attachments(sent_email_id);

@@ -15,12 +15,11 @@ Cloudflare Worker webmail server unifying all documentation.
                    │
                    ▼
          [Worker: fetch() HTTP handler]
-         REST API + serves static SPA + attachments
+       REST API + serves static SPAs + attachments
                    │
                    ▼
-           [Webmail SPA]
-          (vanilla JS, single HTML file
-           bundled and served by the Worker)
+         [Webmail SPA + Admin SPA]
+        (vanilla JS, served by the Worker)
 
 Outbound:
  [Webmail compose → POST /api/send]
@@ -52,6 +51,8 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
       - `OCI_EMAIL_API_KEY_FINGERPRINT`
       - `OCI_EMAIL_API_PRIVATE_KEY`
       - `OCI_EMAIL_COMPARTMENT_OCID`
+       - Optional: `OCI_EMAIL_CONTROL_ENDPOINT`
+             - If omitted, control-plane endpoint is derived from `OCI_EMAIL_ENDPOINT` region.
    - `AUTH_SECRET`
 6. Optional: set `APP_ORIGIN` in Wrangler vars if the UI is served from a different trusted origin.
 7. Configure `.dev.vars` for local development (see `.dev.vars.example`).
@@ -59,11 +60,24 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 ## Security Notes
 
 - Passwords are stored using `argon2id` hashes (legacy SHA-256 hashes are upgraded automatically on successful login).
+- RBAC roles are stored in `user_roles` (`admin` or `user`).
 - Accounts can own multiple email addresses in `user_addresses`; `users.email` remains as the legacy primary address for compatibility.
 - API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.
 - Login attempts are throttled per `client-ip + username` key (`login_attempts` table in `schema.sql`).
 - If this project was already deployed before this update, re-run `npm run db:migrate` to create the new table/indexes.
 - Outbound email is sent with OCI Email Delivery Submission HTTPS API over TLS on port 443 and signed with OCI Signature Version 1.
+- Admin user CRUD also synchronizes OCI Email Delivery approved senders through the control-plane Sender APIs (`listSenders`, `createSender`, `deleteSender`).
+
+## Admin Console
+
+- Route: `/admin`
+- Access: authenticated users with role `admin` only.
+- Features:
+      - User create, read, update, delete
+      - Role editing (`admin` / `user`)
+      - Primary and alias email management
+      - Password reset/update
+      - OCI approved-sender synchronization for add/update/delete workflows
 
 ## Commands
 

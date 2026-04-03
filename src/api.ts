@@ -7,13 +7,15 @@ import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
 import { z } from 'zod';
 import type { Env } from './index';
-import { getWebmailHtml } from './webmail';
+import { getAdminConsoleHtml } from './admin-console.ts';
+import { getWebmailHtml } from './webmail.ts';
 import {
   authenticate,
   clearLoginAttempts,
   createSession,
   getLoginThrottleKey,
   getSessionCookieName,
+  hashPassword,
   isLoginBlocked,
   recordFailedLoginAttempt,
   revokeSession,
@@ -31,6 +33,7 @@ import {
   listUserEmailAddresses,
   normalizeEmailAddress,
 } from './user-addresses';
+import { ensureApprovedSenders, removeApprovedSenders } from './oracle-approved-senders';
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -56,11 +59,13 @@ interface PreparedSendAttachment extends SendAttachment {
 }
 
 type AttachmentOwnerColumn = 'email_id' | 'sent_email_id';
+type UserRole = 'admin' | 'user';
 
 type AuthenticatedUser = {
   id: number;
   email: string;
   username: string;
+  role: UserRole;
 };
 
 type AppBindings = {
@@ -88,6 +93,23 @@ const sendAttachmentSchema = z.object({
   filename: z.string(),
   content: z.string(),
   mimeType: z.string().optional(),
+});
+
+const adminRoleSchema = z.enum(['admin', 'user']);
+const adminUserCreateSchema = z.object({
+  username: z.string().trim().min(1).max(120),
+  password: z.string().min(8),
+  role: adminRoleSchema,
+  primaryEmail: z.string().trim().min(3),
+  emails: z.array(z.string()).optional().default([]),
+});
+
+const adminUserUpdateSchema = z.object({
+  username: z.string().trim().min(1).max(120),
+  password: z.string().min(8).optional(),
+  role: adminRoleSchema,
+  primaryEmail: z.string().trim().min(3),
+  emails: z.array(z.string()).optional().default([]),
 });
 
 function resolveAllowedOrigin(request: Request, env: Env): string | null {
@@ -209,6 +231,250 @@ async function resolveUserAddressSet(
     primaryEmail,
     emails,
   };
+}
+
+interface AdminUserRow {
+  id: number;
+  username: string;
+  legacy_email: string;
+  created_at: string;
+  role: string | null;
+}
+
+interface UserIdRow {
+  id: number;
+}
+
+interface UserAddressOwnerRow {
+  user_id: number;
+}
+
+function normalizeRole(role: string | null | undefined): UserRole {
+  return role === 'admin' ? 'admin' : 'user';
+}
+
+function normalizeManagedEmails(primaryEmail: string, aliasEmails: string[]): string[] {
+  const normalizedPrimary = normalizeEmailAddress(primaryEmail);
+  if (!isValidEmailAddress(normalizedPrimary)) {
+    throw new Error('primaryEmail must be a valid email address');
+  }
+
+  const normalizedEmails = [normalizedPrimary];
+  const seen = new Set<string>([normalizedPrimary]);
+
+  for (const candidate of aliasEmails) {
+    const normalized = normalizeEmailAddress(String(candidate ?? ''));
+    if (!normalized) {
+      continue;
+    }
+
+    if (!isValidEmailAddress(normalized)) {
+      throw new Error(`Invalid email address: ${candidate}`);
+    }
+
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      normalizedEmails.push(normalized);
+    }
+  }
+
+  return normalizedEmails;
+}
+
+function isUniqueConstraintError(err: unknown): boolean {
+  return err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+}
+
+function difference(left: string[], right: string[]): string[] {
+  const rightSet = new Set(right);
+  return left.filter((value) => !rightSet.has(value));
+}
+
+async function setUserRole(env: Env, userId: number, role: UserRole): Promise<void> {
+  await env.DB.prepare(
+    `
+      INSERT INTO user_roles (user_id, role, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(user_id) DO UPDATE SET
+        role = excluded.role,
+        updated_at = excluded.updated_at
+    `
+  )
+    .bind(userId, role)
+    .run();
+}
+
+async function replaceUserEmailAddresses(env: Env, userId: number, emails: string[]): Promise<void> {
+  await env.DB.prepare('DELETE FROM user_addresses WHERE user_id = ?')
+    .bind(userId)
+    .run();
+
+  for (let i = 0; i < emails.length; i += 1) {
+    await env.DB.prepare(
+      `
+        INSERT INTO user_addresses (user_id, address, is_primary)
+        VALUES (?, ?, ?)
+      `
+    )
+      .bind(userId, emails[i], i === 0 ? 1 : 0)
+      .run();
+  }
+
+  await env.DB.prepare('UPDATE users SET email = ? WHERE id = ?')
+    .bind(emails[0], userId)
+    .run();
+}
+
+async function getUserRole(env: Env, userId: number): Promise<UserRole> {
+  const row = await env.DB.prepare('SELECT role FROM user_roles WHERE user_id = ?')
+    .bind(userId)
+    .first<{ role: string | null }>();
+
+  return normalizeRole(row?.role);
+}
+
+async function countAdminUsers(env: Env): Promise<number> {
+  const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM user_roles WHERE role = 'admin'")
+    .first<{ count: number }>();
+
+  return row?.count ?? 0;
+}
+
+async function listAdminUsers(env: Env): Promise<
+  Array<{
+    id: number;
+    username: string;
+    role: UserRole;
+    primaryEmail: string;
+    emails: string[];
+    createdAt: string;
+  }>
+> {
+  const rows = await env.DB.prepare(
+    `
+      SELECT users.id, users.username, users.email AS legacy_email, users.created_at, user_roles.role
+      FROM users
+      LEFT JOIN user_roles ON user_roles.user_id = users.id
+      ORDER BY users.id ASC
+    `
+  ).all<AdminUserRow>();
+
+  const result: Array<{
+    id: number;
+    username: string;
+    role: UserRole;
+    primaryEmail: string;
+    emails: string[];
+    createdAt: string;
+  }> = [];
+
+  for (const row of rows.results ?? []) {
+    const addressSet = await resolveUserAddressSet(env, row.id, row.legacy_email);
+    result.push({
+      id: row.id,
+      username: row.username,
+      role: normalizeRole(row.role),
+      primaryEmail: addressSet.primaryEmail,
+      emails: addressSet.emails,
+      createdAt: row.created_at,
+    });
+  }
+
+  return result;
+}
+
+async function getAdminUserById(
+  env: Env,
+  userId: number
+): Promise<{
+  id: number;
+  username: string;
+  role: UserRole;
+  primaryEmail: string;
+  emails: string[];
+  createdAt: string;
+} | null> {
+  const row = await env.DB.prepare(
+    `
+      SELECT users.id, users.username, users.email AS legacy_email, users.created_at, user_roles.role
+      FROM users
+      LEFT JOIN user_roles ON user_roles.user_id = users.id
+      WHERE users.id = ?
+      LIMIT 1
+    `
+  )
+    .bind(userId)
+    .first<AdminUserRow>();
+
+  if (!row) {
+    return null;
+  }
+
+  const addressSet = await resolveUserAddressSet(env, row.id, row.legacy_email);
+  return {
+    id: row.id,
+    username: row.username,
+    role: normalizeRole(row.role),
+    primaryEmail: addressSet.primaryEmail,
+    emails: addressSet.emails,
+    createdAt: row.created_at,
+  };
+}
+
+async function findUserIdByUsername(env: Env, username: string): Promise<number | null> {
+  const row = await env.DB.prepare('SELECT id FROM users WHERE username = ? LIMIT 1')
+    .bind(username)
+    .first<UserIdRow>();
+
+  return row?.id ?? null;
+}
+
+async function findOwnerIdByEmail(env: Env, email: string): Promise<number | null> {
+  const normalized = normalizeEmailAddress(email);
+  if (!normalized) {
+    return null;
+  }
+
+  const addressRow = await env.DB.prepare('SELECT user_id FROM user_addresses WHERE address = ? LIMIT 1')
+    .bind(normalized)
+    .first<UserAddressOwnerRow>();
+  if (addressRow) {
+    return addressRow.user_id;
+  }
+
+  const legacyRow = await env.DB.prepare('SELECT id FROM users WHERE lower(trim(email)) = ? LIMIT 1')
+    .bind(normalized)
+    .first<UserIdRow>();
+
+  return legacyRow?.id ?? null;
+}
+
+async function validateUsernameAvailability(
+  env: Env,
+  username: string,
+  currentUserId?: number
+): Promise<string | null> {
+  const ownerId = await findUserIdByUsername(env, username);
+  if (ownerId !== null && ownerId !== currentUserId) {
+    return 'username is already in use';
+  }
+
+  return null;
+}
+
+async function validateEmailAvailability(
+  env: Env,
+  emails: string[],
+  currentUserId?: number
+): Promise<string | null> {
+  for (const email of emails) {
+    const ownerId = await findOwnerIdByEmail(env, email);
+    if (ownerId !== null && ownerId !== currentUserId) {
+      return `${email} is already assigned to another user`;
+    }
+  }
+
+  return null;
 }
 
 async function listAttachmentsByOwner(
@@ -333,6 +599,8 @@ app.use(
 
 app.get('/', (c) => c.html(getWebmailHtml()));
 app.get('/index.html', (c) => c.html(getWebmailHtml()));
+app.get('/admin', (c) => c.html(getAdminConsoleHtml()));
+app.get('/admin/index.html', (c) => c.html(getAdminConsoleHtml()));
 app.get('/favicon.ico', (c) => c.body(null, 204));
 
 const api = new Hono<AppBindings>();
@@ -389,11 +657,14 @@ api.post(
   });
 
   const userAddressSet = await resolveUserAddressSet(c.env, user.id, user.email);
+  const userRole = await getUserRole(c.env, user.id);
 
   return c.json({
     token: session.token,
     email: userAddressSet.primaryEmail,
     emails: userAddressSet.emails,
+    username,
+    role: userRole,
     expiresAt: session.expiresAt,
   });
 });
@@ -420,7 +691,17 @@ const requireAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
   await next();
 };
 
+const requireAdmin: MiddlewareHandler<AppBindings> = async (c, next) => {
+  const user = c.get('user');
+  if (user.role !== 'admin') {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+
+  await next();
+};
+
 api.use('*', requireAuth);
+api.use('/admin/*', requireAdmin);
 
 api.get('/me', async (c) => {
   const user = c.get('user');
@@ -431,6 +712,7 @@ api.get('/me', async (c) => {
     email: userAddressSet.primaryEmail,
     emails: userAddressSet.emails,
     username: user.username,
+    role: user.role,
   });
 });
 
@@ -825,6 +1107,259 @@ api.post(
 
     return c.json({ error: message }, 500);
   }
+});
+
+api.get('/admin/users', async (c) => {
+  const users = await listAdminUsers(c.env);
+  return c.json(users);
+});
+
+api.post(
+  '/admin/users',
+  zValidator('json', adminUserCreateSchema, (result, c) => {
+    if (!result.success) {
+      return c.json({ error: 'username, password, role, and primaryEmail are required' }, 400);
+    }
+  }),
+  async (c) => {
+    const body = c.req.valid('json');
+
+    let desiredEmails: string[];
+    try {
+      desiredEmails = normalizeManagedEmails(body.primaryEmail, body.emails ?? []);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : 'Invalid email list' }, 400);
+    }
+
+    const username = body.username.trim();
+    const usernameError = await validateUsernameAvailability(c.env, username);
+    if (usernameError) {
+      return c.json({ error: usernameError }, 409);
+    }
+
+    const emailError = await validateEmailAvailability(c.env, desiredEmails);
+    if (emailError) {
+      return c.json({ error: emailError }, 409);
+    }
+
+    let createdApprovedSenders: string[] = [];
+    try {
+      createdApprovedSenders = await ensureApprovedSenders(c.env, desiredEmails);
+    } catch (err) {
+      console.error('Failed to ensure OCI approved sender set during user create:', err);
+      return c.json(
+        { error: err instanceof Error ? err.message : 'OCI approved sender sync failed' },
+        502
+      );
+    }
+
+    try {
+      const passwordHash = await hashPassword(body.password);
+      const inserted = await c.env.DB.prepare(
+        `
+          INSERT INTO users (username, email, password_hash)
+          VALUES (?, ?, ?)
+          RETURNING id
+        `
+      )
+        .bind(username, desiredEmails[0], passwordHash)
+        .first<{ id: number }>();
+
+      if (!inserted) {
+        throw new Error('Failed to create user');
+      }
+
+      await replaceUserEmailAddresses(c.env, inserted.id, desiredEmails);
+      await setUserRole(c.env, inserted.id, body.role);
+
+      const createdUser = await getAdminUserById(c.env, inserted.id);
+      if (!createdUser) {
+        throw new Error('Failed to load newly created user');
+      }
+
+      return c.json(createdUser, 201);
+    } catch (err) {
+      console.error('User create failed after OCI sender sync:', err);
+
+      if (createdApprovedSenders.length > 0) {
+        try {
+          await removeApprovedSenders(c.env, createdApprovedSenders);
+        } catch (rollbackErr) {
+          console.error('Failed to rollback OCI approved senders after user create error:', rollbackErr);
+        }
+      }
+
+      if (isUniqueConstraintError(err)) {
+        return c.json({ error: 'username or email is already in use' }, 409);
+      }
+
+      return c.json({ error: 'Failed to create user' }, 500);
+    }
+  }
+);
+
+api.put(
+  '/admin/users/:id',
+  zValidator('json', adminUserUpdateSchema, (result, c) => {
+    if (!result.success) {
+      return c.json({ error: 'username, role, and primaryEmail are required' }, 400);
+    }
+  }),
+  async (c) => {
+    const userId = parseNumericId(c.req.param('id'));
+    if (userId === null) {
+      return c.json({ error: 'Invalid user id' }, 400);
+    }
+
+    const body = c.req.valid('json');
+    const existing = await getAdminUserById(c.env, userId);
+    if (!existing) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    if (existing.role === 'admin' && body.role !== 'admin') {
+      const adminCount = await countAdminUsers(c.env);
+      if (adminCount <= 1) {
+        return c.json({ error: 'Cannot remove role from the last admin account' }, 400);
+      }
+    }
+
+    let desiredEmails: string[];
+    try {
+      desiredEmails = normalizeManagedEmails(body.primaryEmail, body.emails ?? []);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : 'Invalid email list' }, 400);
+    }
+
+    const username = body.username.trim();
+    const usernameError = await validateUsernameAvailability(c.env, username, userId);
+    if (usernameError) {
+      return c.json({ error: usernameError }, 409);
+    }
+
+    const emailError = await validateEmailAvailability(c.env, desiredEmails, userId);
+    if (emailError) {
+      return c.json({ error: emailError }, 409);
+    }
+
+    const oldEmails = existing.emails;
+    const emailsToDelete = difference(oldEmails, desiredEmails);
+
+    let createdApprovedSenders: string[] = [];
+    try {
+      createdApprovedSenders = await ensureApprovedSenders(c.env, desiredEmails);
+    } catch (err) {
+      console.error('Failed to ensure OCI approved sender set during user update:', err);
+      return c.json(
+        { error: err instanceof Error ? err.message : 'OCI approved sender sync failed' },
+        502
+      );
+    }
+
+    try {
+      await c.env.DB.prepare('UPDATE users SET username = ?, email = ? WHERE id = ?')
+        .bind(username, desiredEmails[0], userId)
+        .run();
+
+      await replaceUserEmailAddresses(c.env, userId, desiredEmails);
+      await setUserRole(c.env, userId, body.role);
+
+      if (typeof body.password === 'string' && body.password.length > 0) {
+        const passwordHash = await hashPassword(body.password);
+        await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+          .bind(passwordHash, userId)
+          .run();
+      }
+    } catch (err) {
+      console.error('Failed to update user in database:', err);
+
+      if (createdApprovedSenders.length > 0) {
+        try {
+          await removeApprovedSenders(c.env, createdApprovedSenders);
+        } catch (rollbackErr) {
+          console.error('Failed to rollback OCI approved senders after user update error:', rollbackErr);
+        }
+      }
+
+      if (isUniqueConstraintError(err)) {
+        return c.json({ error: 'username or email is already in use' }, 409);
+      }
+
+      return c.json({ error: 'Failed to update user' }, 500);
+    }
+
+    let warning: string | null = null;
+    if (emailsToDelete.length > 0) {
+      try {
+        await removeApprovedSenders(c.env, emailsToDelete);
+      } catch (err) {
+        console.error('Failed to remove stale OCI approved senders during user update:', err);
+        warning = err instanceof Error ? err.message : 'Failed to remove old OCI approved senders';
+      }
+    }
+
+    const updated = await getAdminUserById(c.env, userId);
+    if (!updated) {
+      return c.json({ error: 'User disappeared after update' }, 500);
+    }
+
+    return c.json({
+      ...updated,
+      ...(warning ? { warning } : {}),
+    });
+  }
+);
+
+api.delete('/admin/users/:id', async (c) => {
+  const actingUser = c.get('user');
+  const userId = parseNumericId(c.req.param('id'));
+  if (userId === null) {
+    return c.json({ error: 'Invalid user id' }, 400);
+  }
+
+  if (actingUser.id === userId) {
+    return c.json({ error: 'You cannot delete your own admin account' }, 400);
+  }
+
+  const existing = await getAdminUserById(c.env, userId);
+  if (!existing) {
+    return c.json({ error: 'User not found' }, 404);
+  }
+
+  if (existing.role === 'admin') {
+    const adminCount = await countAdminUsers(c.env);
+    if (adminCount <= 1) {
+      return c.json({ error: 'Cannot delete the last admin account' }, 400);
+    }
+  }
+
+  try {
+    await removeApprovedSenders(c.env, existing.emails);
+  } catch (err) {
+    console.error('Failed to remove OCI approved senders during user delete:', err);
+    return c.json(
+      { error: err instanceof Error ? err.message : 'Failed to remove OCI approved senders' },
+      502
+    );
+  }
+
+  try {
+    await c.env.DB.prepare('DELETE FROM users WHERE id = ?')
+      .bind(userId)
+      .run();
+  } catch (err) {
+    console.error('Failed to delete user row after OCI sender deletion:', err);
+
+    try {
+      await ensureApprovedSenders(c.env, existing.emails);
+    } catch (rollbackErr) {
+      console.error('Failed to restore OCI approved senders after delete rollback:', rollbackErr);
+    }
+
+    return c.json({ error: 'Failed to delete user' }, 500);
+  }
+
+  return c.json({ ok: true, id: userId });
 });
 
 api.notFound((c) => c.json({ error: 'Not found' }, 404));
