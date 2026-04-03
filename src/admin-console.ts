@@ -338,7 +338,7 @@ export function getAdminConsoleHtml(): string {
     <strong>Admin role required.</strong>
     <div>This account is authenticated but does not have access to this console.</div>
     <div style="margin-top:10px;">
-      <a href="/">Return to webmail</a>
+      <a href="/mail">Return to webmail</a>
     </div>
   </div>
 
@@ -455,7 +455,7 @@ export function getAdminConsoleHtml(): string {
 
     function splitAliasEmails(raw) {
       return String(raw || '')
-        .split(/[\n,;]/)
+        .split(/[\\n,;]/)
         .map((part) => String(part || '').trim().toLowerCase())
         .filter((part) => part.length > 0);
     }
@@ -470,21 +470,11 @@ export function getAdminConsoleHtml(): string {
     }
 
     function showLogin() {
-      const login = byId('loginWrap');
-      const shell = byId('shell');
-      const forbidden = byId('forbidden');
-      if (login) login.style.display = 'flex';
-      if (shell) shell.style.display = 'none';
-      if (forbidden) forbidden.style.display = 'none';
+      window.location.href = '/login';
     }
 
     function showForbidden() {
-      const login = byId('loginWrap');
-      const shell = byId('shell');
-      const forbidden = byId('forbidden');
-      if (login) login.style.display = 'none';
-      if (shell) shell.style.display = 'none';
-      if (forbidden) forbidden.style.display = 'block';
+      window.location.href = '/mail';
     }
 
     function showShell() {
@@ -535,7 +525,7 @@ export function getAdminConsoleHtml(): string {
         ? user.emails.filter((email) => String(email || '').toLowerCase() !== String(user.primaryEmail || '').toLowerCase())
         : [];
 
-      if (aliasEmails) aliasEmails.value = aliases.join('\n');
+      if (aliasEmails) aliasEmails.value = aliases.join('\\n');
       if (passwordInput) passwordInput.value = '';
       setStatus('formStatus', '', '');
     }
@@ -729,12 +719,17 @@ export function getAdminConsoleHtml(): string {
     }
 
     async function doLogout() {
-      await apiFetch('/api/logout', 'POST');
+      try {
+        await apiFetch('/api/logout', 'POST');
+      } catch {
+        // Ignore network errors and force a client-side sign-out redirect.
+      }
+
       currentUser = null;
       users = [];
       editingUserId = null;
       setEditMode(null);
-      showLogin();
+      window.location.href = '/login';
     }
 
     async function bootstrapSession() {
@@ -803,7 +798,7 @@ export function getAdminConsoleHtml(): string {
       const goWebmailBtn = byId('goWebmailBtn');
       if (goWebmailBtn) {
         goWebmailBtn.addEventListener('click', () => {
-          window.location.href = '/';
+          window.location.href = '/mail';
         });
       }
 

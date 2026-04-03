@@ -1776,14 +1776,11 @@ export function getWebmailHtml(): string {
     viewerContext = null;
     setSenderAddressesFromPayload({});
     setCurrentUserRole('user');
-    showLogin();
+    window.location.href = '/login';
   }
 
   function showLogin() {
-    const login = byId('login');
-    const app = byId('app');
-    if (login) login.style.display = 'flex';
-    if (app) app.style.display = 'none';
+    window.location.href = '/login';
   }
 
   function showApp() {

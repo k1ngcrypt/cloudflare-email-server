@@ -8,6 +8,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { z } from 'zod';
 import type { Env } from './index';
 import { getAdminConsoleHtml } from './admin-console.ts';
+import { getLoginHtml } from './login';
 import { getWebmailHtml } from './webmail.ts';
 import {
   authenticate,
@@ -597,10 +598,44 @@ app.use(
   })
 );
 
-app.get('/', (c) => c.html(getWebmailHtml()));
-app.get('/index.html', (c) => c.html(getWebmailHtml()));
-app.get('/admin', (c) => c.html(getAdminConsoleHtml()));
-app.get('/admin/index.html', (c) => c.html(getAdminConsoleHtml()));
+app.get('/', (c) => c.redirect('/login', 302));
+app.get('/index.html', (c) => c.redirect('/login', 302));
+
+app.get('/login', async (c) => {
+  const user = await authenticate(c.req.raw, c.env);
+  if (user) {
+    return c.redirect('/mail', 302);
+  }
+
+  return c.html(getLoginHtml());
+});
+
+async function handleMailPage(c: Context<AppBindings>): Promise<Response> {
+  const user = await authenticate(c.req.raw, c.env);
+  if (!user) {
+    return c.redirect('/login', 302);
+  }
+
+  return c.html(getWebmailHtml());
+}
+
+async function handleAdminPage(c: Context<AppBindings>): Promise<Response> {
+  const user = await authenticate(c.req.raw, c.env);
+  if (!user) {
+    return c.redirect('/login', 302);
+  }
+
+  if (user.role !== 'admin') {
+    return c.redirect('/mail', 302);
+  }
+
+  return c.html(getAdminConsoleHtml());
+}
+
+app.get('/mail', handleMailPage);
+app.get('/mail/index.html', handleMailPage);
+app.get('/admin', handleAdminPage);
+app.get('/admin/index.html', handleAdminPage);
 app.get('/favicon.ico', (c) => c.body(null, 204));
 
 const api = new Hono<AppBindings>();

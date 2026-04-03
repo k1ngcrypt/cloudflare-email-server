@@ -68,6 +68,15 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 - Outbound email is sent with OCI Email Delivery Submission HTTPS API over TLS on port 443 and signed with OCI Signature Version 1.
 - Admin user CRUD also synchronizes OCI Email Delivery approved senders through the control-plane Sender APIs (`listSenders`, `createSender`, `deleteSender`).
 
+## Route Map
+
+- `/` redirects to `/login` for browser traffic. Incoming mail still enters through the Worker `email()` handler.
+- `/login` is the unified login page. Authenticated sessions are redirected to `/mail`.
+- `/mail` serves the webmail UI and requires authentication. Unauthenticated sessions are redirected to `/login`.
+- `/admin` serves the admin console only for authenticated admin users.
+- `/admin` redirects unauthenticated sessions to `/login`.
+- `/admin` redirects authenticated non-admin sessions to `/mail`.
+
 ## Admin Console
 
 - Route: `/admin`

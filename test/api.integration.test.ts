@@ -50,15 +50,71 @@ describe('worker HTTP API integration', () => {
     expect(untrusted.headers.get('access-control-allow-credentials')).toBeNull();
   });
 
-  it('serves the webmail shell with hardened headers', async () => {
-    const response = await apiRequest('/');
+  it('serves the unified login shell with hardened headers', async () => {
+    const response = await apiRequest('/login');
 
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
 
     const body = await response.text();
-    expect(body).toContain('Webmail Login');
+    expect(body).toContain('Unified Login');
+  });
+
+  it('applies page route redirects for anonymous, user, and admin sessions', async () => {
+    const root = await apiRequest('/', { redirect: 'manual' });
+    expect(root.status).toBe(302);
+    expect(root.headers.get('location')).toBe('/login');
+
+    const anonymousMail = await apiRequest('/mail', { redirect: 'manual' });
+    expect(anonymousMail.status).toBe(302);
+    expect(anonymousMail.headers.get('location')).toBe('/login');
+
+    const anonymousAdmin = await apiRequest('/admin', { redirect: 'manual' });
+    expect(anonymousAdmin.status).toBe(302);
+    expect(anonymousAdmin.headers.get('location')).toBe('/login');
+
+    const adminSession = await createAuthenticatedSession({
+      username: 'admin-route-user',
+      email: 'admin-route-user@mail.example.test',
+      password: 'Admin-Route-Password-123',
+    });
+
+    const loginWhenAuthenticated = await apiRequest('/login', {
+      redirect: 'manual',
+      headers: {
+        Cookie: adminSession.cookie,
+      },
+    });
+    expect(loginWhenAuthenticated.status).toBe(302);
+    expect(loginWhenAuthenticated.headers.get('location')).toBe('/mail');
+
+    const adminPage = await apiRequest('/admin', {
+      headers: {
+        Cookie: adminSession.cookie,
+      },
+    });
+    expect(adminPage.status).toBe(200);
+    expect(await adminPage.text()).toContain('User Administration');
+
+    const regularUser = await seedLegacyUser({
+      username: 'member-route-user',
+      email: 'member-route-user@mail.example.test',
+      password: 'Member-Route-Password-123',
+    });
+
+    const regularLogin = await login(regularUser.username, regularUser.password);
+    expect(regularLogin.response.status).toBe(200);
+    expect(regularLogin.cookie).not.toBeNull();
+
+    const adminAsRegularUser = await apiRequest('/admin', {
+      redirect: 'manual',
+      headers: {
+        Cookie: regularLogin.cookie as string,
+      },
+    });
+    expect(adminAsRegularUser.status).toBe(302);
+    expect(adminAsRegularUser.headers.get('location')).toBe('/mail');
   });
 
   it('requires authentication for protected endpoints', async () => {
