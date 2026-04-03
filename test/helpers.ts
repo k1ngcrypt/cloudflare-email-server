@@ -1,5 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import type { Env } from '../src/index';
+import { hashPassword } from '../src/auth';
 
 const BASE_URL = 'https://webmail.test';
 const SCHEMA_STATEMENTS = [
@@ -193,14 +194,6 @@ export function getBindings(): Env {
   return env as unknown as Env;
 }
 
-async function sha256Hex(value: string): Promise<string> {
-  const data = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
-}
-
 export async function resetState(): Promise<void> {
   const bindings = getBindings();
 
@@ -213,14 +206,14 @@ export async function resetState(): Promise<void> {
   }
 }
 
-export async function seedLegacyUser(
+export async function seedUser(
   input: Partial<Pick<SeededUser, 'username' | 'email' | 'password'>> = {}
 ): Promise<SeededUser> {
   const nonce = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
   const username = input.username ?? `user_${nonce}`;
   const email = input.email ?? `${username}@mail.example.test`;
   const password = input.password ?? 'correct horse battery staple';
-  const passwordHash = await sha256Hex(password);
+  const passwordHash = await hashPassword(password);
 
   const row = await getBindings()
     .DB.prepare('INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?) RETURNING id')
@@ -315,7 +308,7 @@ export async function login(
 export async function createAuthenticatedSession(
   input: Partial<Pick<SeededUser, 'username' | 'email' | 'password'>> = {}
 ): Promise<AuthSession> {
-  const user = await seedLegacyUser(input);
+  const user = await seedUser(input);
   const loginResult = await login(user.username, user.password);
 
   if (!loginResult.response.ok) {

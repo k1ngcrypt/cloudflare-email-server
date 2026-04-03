@@ -20,7 +20,7 @@ import {
   isLoginBlocked,
   recordFailedLoginAttempt,
   revokeSession,
-  verifyPasswordAndUpgrade,
+  verifyPassword,
 } from './auth';
 import {
   decodeBase64ToBytes,
@@ -64,7 +64,6 @@ type UserRole = 'admin' | 'user';
 
 type AuthenticatedUser = {
   id: number;
-  email: string;
   username: string;
   role: UserRole;
 };
@@ -195,20 +194,9 @@ async function failedLoginResponse(c: Context<AppBindings>, throttleKey: string)
 
 async function resolveUserAddressSet(
   env: Env,
-  userId: number,
-  fallbackEmail?: string | null
+  userId: number
 ): Promise<{ primaryEmail: string; emails: string[] }> {
-  const normalizedFallback =
-    typeof fallbackEmail === 'string' && fallbackEmail.trim().length > 0
-      ? normalizeEmailAddress(fallbackEmail)
-      : '';
-
-  const fromTable = await listUserEmailAddresses(env, userId, fallbackEmail);
-  const candidates = [...fromTable];
-
-  if (normalizedFallback.length > 0) {
-    candidates.push(normalizedFallback);
-  }
+  const candidates = await listUserEmailAddresses(env, userId);
 
   const emails: string[] = [];
   const seen = new Set<string>();
@@ -237,7 +225,6 @@ async function resolveUserAddressSet(
 interface AdminUserRow {
   id: number;
   username: string;
-  legacy_email: string;
   created_at: string;
   role: string | null;
 }
@@ -353,7 +340,7 @@ async function listAdminUsers(env: Env): Promise<
 > {
   const rows = await env.DB.prepare(
     `
-      SELECT users.id, users.username, users.email AS legacy_email, users.created_at, user_roles.role
+      SELECT users.id, users.username, users.created_at, user_roles.role
       FROM users
       LEFT JOIN user_roles ON user_roles.user_id = users.id
       ORDER BY users.id ASC
@@ -370,7 +357,7 @@ async function listAdminUsers(env: Env): Promise<
   }> = [];
 
   for (const row of rows.results ?? []) {
-    const addressSet = await resolveUserAddressSet(env, row.id, row.legacy_email);
+    const addressSet = await resolveUserAddressSet(env, row.id);
     result.push({
       id: row.id,
       username: row.username,
@@ -397,7 +384,7 @@ async function getAdminUserById(
 } | null> {
   const row = await env.DB.prepare(
     `
-      SELECT users.id, users.username, users.email AS legacy_email, users.created_at, user_roles.role
+      SELECT users.id, users.username, users.created_at, user_roles.role
       FROM users
       LEFT JOIN user_roles ON user_roles.user_id = users.id
       WHERE users.id = ?
@@ -411,7 +398,7 @@ async function getAdminUserById(
     return null;
   }
 
-  const addressSet = await resolveUserAddressSet(env, row.id, row.legacy_email);
+  const addressSet = await resolveUserAddressSet(env, row.id);
   return {
     id: row.id,
     username: row.username,
@@ -443,11 +430,7 @@ async function findOwnerIdByEmail(env: Env, email: string): Promise<number | nul
     return addressRow.user_id;
   }
 
-  const legacyRow = await env.DB.prepare('SELECT id FROM users WHERE lower(trim(email)) = ? LIMIT 1')
-    .bind(normalized)
-    .first<UserIdRow>();
-
-  return legacyRow?.id ?? null;
+  return null;
 }
 
 async function validateUsernameAvailability(
@@ -675,7 +658,7 @@ api.post(
     return failedLoginResponse(c, throttleKey);
   }
 
-  const passwordOk = await verifyPasswordAndUpgrade(c.env, user.id, body.password, user.password_hash);
+  const passwordOk = await verifyPassword(body.password, user.password_hash);
   if (!passwordOk) {
     return failedLoginResponse(c, throttleKey);
   }
@@ -691,7 +674,7 @@ api.post(
     secure: true,
   });
 
-  const userAddressSet = await resolveUserAddressSet(c.env, user.id, user.email);
+  const userAddressSet = await resolveUserAddressSet(c.env, user.id);
   const userRole = await getUserRole(c.env, user.id);
 
   return c.json({
@@ -740,7 +723,7 @@ api.use('/admin/*', requireAdmin);
 
 api.get('/me', async (c) => {
   const user = c.get('user');
-  const userAddressSet = await resolveUserAddressSet(c.env, user.id, user.email);
+  const userAddressSet = await resolveUserAddressSet(c.env, user.id);
 
   return c.json({
     id: user.id,
@@ -988,7 +971,7 @@ api.post(
     return c.json({ error: 'to, subject, and text are required' }, 400);
   }
 
-  const userAddressSet = await resolveUserAddressSet(c.env, user.id, user.email);
+  const userAddressSet = await resolveUserAddressSet(c.env, user.id);
   let fromAddress = userAddressSet.primaryEmail;
 
   if (typeof body.from === 'string' && body.from.trim().length > 0) {

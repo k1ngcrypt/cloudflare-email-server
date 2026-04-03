@@ -3,7 +3,7 @@ import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import worker from '../src/index.ts';
 import { handleIncomingEmail } from '../src/inbound.ts';
 import type { Env } from '../src/index';
-import { addUserEmailAddress, getBindings, resetState, seedLegacyUser } from './helpers';
+import { addUserEmailAddress, getBindings, resetState, seedUser } from './helpers';
 
 function buildPlainTextMime(toAddress: string): string {
   return [
@@ -136,7 +136,7 @@ describe('inbound email handler integration', () => {
   });
 
   it('routes inbound mail addressed to a user alias', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'alias-recipient-user',
       email: 'primary-alias@mail.example.test',
       password: 'Alias-Inbound-Pass-123',
@@ -166,7 +166,7 @@ describe('inbound email handler integration', () => {
   });
 
   it('stores parsed inbound email and attachment metadata in D1 and R2', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'inbound-user',
       email: 'inbound-user@mail.example.test',
       password: 'Inbound-Pass-123',
@@ -238,7 +238,7 @@ describe('inbound email handler integration', () => {
   });
 
   it('normalizes recipient casing and falls back to envelope metadata defaults', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'normalized-user',
       email: 'normalized-user@mail.example.test',
       password: 'Normalize-Pass-123',
@@ -282,7 +282,7 @@ describe('inbound email handler integration', () => {
   });
 
   it('rejects inbound messages that exceed attachment count limits', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'too-many-inbound',
       email: 'too-many-inbound@mail.example.test',
       password: 'Too-Many-Pass-123',
@@ -307,7 +307,7 @@ describe('inbound email handler integration', () => {
   });
 
   it('rejects with temporary failure and rolls back DB state when storage write fails', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'rollback-user',
       email: 'rollback-user@mail.example.test',
       password: 'Rollback-Pass-123',

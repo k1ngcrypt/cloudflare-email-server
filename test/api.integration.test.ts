@@ -7,7 +7,7 @@ import {
   createAuthenticatedSession,
   login,
   resetState,
-  seedLegacyUser,
+  seedUser,
 } from './helpers';
 
 function bindings(): Env {
@@ -97,7 +97,7 @@ describe('worker HTTP API integration', () => {
     expect(adminPage.status).toBe(200);
     expect(await adminPage.text()).toContain('User Administration');
 
-    const regularUser = await seedLegacyUser({
+    const regularUser = await seedUser({
       username: 'member-route-user',
       email: 'member-route-user@mail.example.test',
       password: 'Member-Route-Password-123',
@@ -154,7 +154,7 @@ describe('worker HTTP API integration', () => {
   });
 
   it('issues cookie-backed sessions and revokes them on logout', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'alice',
       email: 'alice@mail.example.test',
       password: 'S3cur3!Passphrase',
@@ -211,7 +211,7 @@ describe('worker HTTP API integration', () => {
   });
 
   it('throttles repeated failed logins per client IP and username', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'throttle-user',
       email: 'throttle-user@mail.example.test',
       password: 'Correct-Password-123',
@@ -237,13 +237,13 @@ describe('worker HTTP API integration', () => {
   });
 
   it('scopes login throttling by both client IP and username', async () => {
-    const blockedUser = await seedLegacyUser({
+    const blockedUser = await seedUser({
       username: 'blocked-user',
       email: 'blocked-user@mail.example.test',
       password: 'Blocked-Password-123',
     });
 
-    const unaffectedUser = await seedLegacyUser({
+    const unaffectedUser = await seedUser({
       username: 'unaffected-user',
       email: 'unaffected-user@mail.example.test',
       password: 'Unaffected-Password-123',
@@ -280,7 +280,7 @@ describe('worker HTTP API integration', () => {
       password: 'Inbox-Pass-123',
     });
 
-    const otherUser = await seedLegacyUser({
+    const otherUser = await seedUser({
       username: 'other',
       email: 'other@mail.example.test',
       password: 'Other-Pass-123',

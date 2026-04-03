@@ -1,6 +1,5 @@
 import { argon2id } from '@noble/hashes/argon2.js';
 import type { Env } from './index';
-import { getPrimaryUserEmailAddress } from './user-addresses';
 
 const TOKEN_COOKIE_NAME = 'session_token';
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
@@ -11,8 +10,6 @@ const ARGON2_ITERATIONS = 2;
 const ARGON2_PARALLELISM = 1;
 const ARGON2_SALT_BYTES = 16;
 const ARGON2_HASH_BYTES = 32;
-
-const LEGACY_SHA256_RE = /^[a-f0-9]{64}$/;
 
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 10;
@@ -108,12 +105,6 @@ function parseArgon2Hash(encoded: string): ParsedArgon2Hash | null {
   }
 }
 
-async function legacySha256Hex(password: string): Promise<string> {
-  const data = new TextEncoder().encode(password);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  return bytesToHex(new Uint8Array(hashBuffer));
-}
-
 async function sessionTokenHash(env: Env, token: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
@@ -169,10 +160,6 @@ export function getSessionCookieName(): string {
   return TOKEN_COOKIE_NAME;
 }
 
-export function getSessionMaxAgeSeconds(): number {
-  return SESSION_MAX_AGE_SECONDS;
-}
-
 export function getLoginThrottleKey(request: Request, username: string): string {
   const ip = request.headers.get('CF-Connecting-IP')?.trim() || 'unknown';
   return `${ip}:${username.trim().toLowerCase()}`;
@@ -199,43 +186,23 @@ export async function hashPassword(password: string): Promise<string> {
   ].join('$');
 }
 
-export async function verifyPasswordAndUpgrade(
-  env: Env,
-  userId: number,
-  password: string,
-  storedHash: string
-): Promise<boolean> {
+export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   const normalized = password.normalize('NFKC');
   const parsedArgon2 = parseArgon2Hash(storedHash);
 
-  if (parsedArgon2) {
-    const derived = argon2id(new TextEncoder().encode(normalized), parsedArgon2.salt, {
-      m: parsedArgon2.memory,
-      t: parsedArgon2.iterations,
-      p: parsedArgon2.parallelism,
-      dkLen: parsedArgon2.hash.length,
-      version: ARGON2_VERSION,
-    });
-
-    return constantTimeEqual(derived, parsedArgon2.hash);
-  }
-
-  if (!LEGACY_SHA256_RE.test(storedHash)) {
+  if (!parsedArgon2) {
     return false;
   }
 
-  const legacyHash = await legacySha256Hex(normalized);
-  if (legacyHash !== storedHash.toLowerCase()) {
-    return false;
-  }
+  const derived = argon2id(new TextEncoder().encode(normalized), parsedArgon2.salt, {
+    m: parsedArgon2.memory,
+    t: parsedArgon2.iterations,
+    p: parsedArgon2.parallelism,
+    dkLen: parsedArgon2.hash.length,
+    version: ARGON2_VERSION,
+  });
 
-  // Seamless migration: successful legacy login upgrades to argon2id.
-  const upgradedHash = await hashPassword(normalized);
-  await env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-    .bind(upgradedHash, userId)
-    .run();
-
-  return true;
+  return constantTimeEqual(derived, parsedArgon2.hash);
 }
 
 export async function createSession(env: Env, userId: number): Promise<SessionInfo> {
@@ -267,7 +234,7 @@ export async function revokeSession(request: Request, env: Env): Promise<void> {
 export async function authenticate(
   request: Request,
   env: Env
-): Promise<{ id: number; email: string; username: string; role: 'admin' | 'user' } | null> {
+): Promise<{ id: number; username: string; role: 'admin' | 'user' } | null> {
   const token = extractSessionToken(request);
   if (!token) return null;
 
@@ -276,7 +243,7 @@ export async function authenticate(
 
   const session = await env.DB.prepare(
     `
-      SELECT users.id, users.email AS legacy_email, users.username, COALESCE(user_roles.role, 'user') AS role
+      SELECT users.id, users.username, COALESCE(user_roles.role, 'user') AS role
       FROM sessions
       JOIN users ON sessions.user_id = users.id
       LEFT JOIN user_roles ON user_roles.user_id = users.id
@@ -285,20 +252,14 @@ export async function authenticate(
     `
   )
     .bind(tokenHash, now)
-    .first<{ id: number; legacy_email: string; username: string; role: string }>();
+    .first<{ id: number; username: string; role: string }>();
 
   if (!session) {
     return null;
   }
 
-  const email = await getPrimaryUserEmailAddress(env, session.id, session.legacy_email);
-  if (!email) {
-    return null;
-  }
-
   return {
     id: session.id,
-    email,
     username: session.username,
     role: session.role === 'admin' ? 'admin' : 'user',
   };

@@ -38,7 +38,6 @@ function makeEnv(): Env {
   return {
     DB: {} as D1Database,
     ATTACHMENTS: {} as R2Bucket,
-    FROM_DOMAIN: 'mail.example.test',
     OCI_EMAIL_ENDPOINT: 'https://cell0.submit.email.ca-montreal-1.oci.oraclecloud.com',
     OCI_EMAIL_COMPARTMENT_OCID: 'ocid1.compartment.oc1..exampleuniqueID',
     OCI_EMAIL_API_TENANCY_OCID: 'ocid1.tenancy.oc1..exampletenancy',

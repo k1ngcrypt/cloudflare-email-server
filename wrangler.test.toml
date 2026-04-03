@@ -14,7 +14,6 @@ bucket_name = "webmail-attachments-test"
 preview_bucket_name = "webmail-attachments-test"
 
 [vars]
-FROM_DOMAIN = "mail.example.test"
 OCI_EMAIL_ENDPOINT = "https://cell0.submit.email.ca-montreal-1.oci.oraclecloud.com"
 OCI_EMAIL_CONTROL_ENDPOINT = ""
 OCI_EMAIL_COMPARTMENT_OCID = "ocid1.compartment.oc1..test"

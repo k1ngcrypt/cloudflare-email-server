@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   username      TEXT NOT NULL UNIQUE,
-  -- Legacy primary address column retained for compatibility and migration bootstrap.
+  -- Denormalized primary address mirrored from user_addresses.
   email         TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -61,7 +61,7 @@ SELECT id, lower(trim(email)), 1
 FROM users
 WHERE email IS NOT NULL AND trim(email) <> '';
 
--- Keep user_addresses in sync with legacy users.email for direct SQL inserts/updates.
+-- Keep user_addresses in sync with users.email for direct SQL inserts/updates.
 CREATE TRIGGER IF NOT EXISTS trg_users_insert_primary_address
 AFTER INSERT ON users
 WHEN NEW.email IS NOT NULL AND trim(NEW.email) <> ''

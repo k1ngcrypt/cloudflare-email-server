@@ -59,9 +59,9 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 
 ## Security Notes
 
-- Passwords are stored using `argon2id` hashes (legacy SHA-256 hashes are upgraded automatically on successful login).
+- Passwords are stored using `argon2id` hashes.
 - RBAC roles are stored in `user_roles` (`admin` or `user`).
-- Accounts can own multiple email addresses in `user_addresses`; `users.email` remains as the legacy primary address for compatibility.
+- Accounts can own multiple email addresses in `user_addresses`; the primary address is the row marked with `is_primary = 1`.
 - API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.
 - Login attempts are throttled per `client-ip + username` key (`login_attempts` table in `schema.sql`).
 - If this project was already deployed before this update, re-run `npm run db:migrate` to create the new table/indexes.

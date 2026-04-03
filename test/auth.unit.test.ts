@@ -10,9 +10,9 @@ import {
   isLoginBlocked,
   recordFailedLoginAttempt,
   revokeSession,
-  verifyPasswordAndUpgrade,
+  verifyPassword,
 } from '../src/auth';
-import { addUserEmailAddress, resetState, seedLegacyUser } from './helpers';
+import { addUserEmailAddress, resetState, seedUser } from './helpers';
 
 function bindings(): Env {
   return env as unknown as Env;
@@ -28,47 +28,25 @@ describe('auth helper behavior', () => {
 
     expect(hash.startsWith('argon2id$')).toBe(true);
 
-    const matches = await verifyPasswordAndUpgrade(bindings(), 0, 'P@ssw0rd!', hash);
-    const mismatch = await verifyPasswordAndUpgrade(bindings(), 0, 'definitely-wrong', hash);
+    const matches = await verifyPassword('P@ssw0rd!', hash);
+    const mismatch = await verifyPassword('definitely-wrong', hash);
 
     expect(matches).toBe(true);
     expect(mismatch).toBe(false);
   });
 
-  it('upgrades legacy SHA-256 hashes after successful verification', async () => {
-    const user = await seedLegacyUser({
-      username: 'legacy-upgrade-user',
-      email: 'legacy-upgrade-user@mail.example.test',
-      password: 'Legacy-Upgrade-Pass-123',
-    });
-
-    const before = await bindings()
-      .DB.prepare('SELECT password_hash FROM users WHERE id = ?')
-      .bind(user.id)
-      .first<{ password_hash: string }>();
-
-    expect(before?.password_hash).toMatch(/^[a-f0-9]{64}$/);
-
-    const verified = await verifyPasswordAndUpgrade(bindings(), user.id, user.password, before?.password_hash as string);
-
-    expect(verified).toBe(true);
-
-    const after = await bindings()
-      .DB.prepare('SELECT password_hash FROM users WHERE id = ?')
-      .bind(user.id)
-      .first<{ password_hash: string }>();
-
-    expect(after?.password_hash).toContain('argon2id$');
-    expect(after?.password_hash).not.toBe(before?.password_hash);
+  it('rejects SHA-256 password hashes', async () => {
+    const verified = await verifyPassword('Legacy-Upgrade-Pass-123', 'a'.repeat(64));
+    expect(verified).toBe(false);
   });
 
   it('rejects malformed stored password hashes that are not supported', async () => {
-    const verified = await verifyPasswordAndUpgrade(bindings(), 0, 'password', 'not-a-hash');
+    const verified = await verifyPassword('password', 'not-a-hash');
     expect(verified).toBe(false);
   });
 
   it('creates, authenticates, and revokes bearer and cookie sessions', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'session-user',
       email: 'session-user@mail.example.test',
       password: 'Session-Pass-123',
@@ -100,8 +78,8 @@ describe('auth helper behavior', () => {
     expect(afterRevoke).toBeNull();
   });
 
-  it('authenticates with the account primary address from user_addresses', async () => {
-    const user = await seedLegacyUser({
+  it('authenticates accounts that have multiple user_addresses entries', async () => {
+    const user = await seedUser({
       username: 'multi-address-auth-user',
       email: 'primary-auth@mail.example.test',
       password: 'Multi-Auth-Pass-123',
@@ -118,11 +96,12 @@ describe('auth helper behavior', () => {
     });
 
     const authenticated = await authenticate(request, bindings());
-    expect(authenticated?.email).toBe('new-primary-auth@mail.example.test');
+    expect(authenticated?.id).toBe(user.id);
+    expect(authenticated?.username).toBe(user.username);
   });
 
   it('rejects sessions that have already expired', async () => {
-    const user = await seedLegacyUser({
+    const user = await seedUser({
       username: 'expired-session-user',
       email: 'expired-session-user@mail.example.test',
       password: 'Expired-Session-Pass-123',
