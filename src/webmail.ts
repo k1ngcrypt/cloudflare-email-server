@@ -64,9 +64,11 @@ export function getWebmailHtml(): string {
 <div id="login">
   <div class="login-box">
     <h2 style="font-size:20px;font-weight:700;color:#1e293b;">Webmail Login</h2>
-    <input id="loginUser" type="text" placeholder="Username" />
-    <input id="loginPass" type="password" placeholder="Password" />
-    <button class="btn btn-primary" onclick="doLogin()">Sign In</button>
+    <form id="loginForm" style="display:flex;flex-direction:column;gap:12px;">
+      <input id="loginUser" type="text" placeholder="Username" autocomplete="username" />
+      <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password" />
+      <button class="btn btn-primary" id="loginBtn" type="submit">Sign In</button>
+    </form>
     <div id="loginError" style="color:#ef4444;font-size:13px;"></div>
   </div>
 </div>
@@ -74,12 +76,12 @@ export function getWebmailHtml(): string {
 <div id="app" style="display:none;width:100%;flex-direction:row;">
   <div id="sidebar">
     <div style="font-weight:700;font-size:16px;margin-bottom:12px;color:#f1f5f9;">Webmail</div>
-    <button class="folder-btn active" data-folder="inbox" onclick="loadFolder('inbox', this)">Inbox</button>
-    <button class="folder-btn" data-folder="sent" onclick="loadFolder('sent', this)">Sent</button>
-    <button class="folder-btn" data-folder="trash" onclick="loadFolder('trash', this)">Trash</button>
+    <button class="folder-btn active" data-folder="inbox" id="folderInboxBtn">Inbox</button>
+    <button class="folder-btn" data-folder="sent" id="folderSentBtn">Sent</button>
+    <button class="folder-btn" data-folder="trash" id="folderTrashBtn">Trash</button>
     <div style="flex:1;"></div>
-    <button class="btn btn-primary" onclick="openCompose()" style="width:100%;">Compose</button>
-    <button class="folder-btn" onclick="logout()" style="margin-top:8px;">Sign Out</button>
+    <button class="btn btn-primary" id="composeOpenBtn" style="width:100%;">Compose</button>
+    <button class="folder-btn" id="logoutBtn" style="margin-top:8px;">Sign Out</button>
   </div>
 
   <div id="list"><div style="padding:16px;color:#94a3b8;font-size:13px;">Loading...</div></div>
@@ -88,7 +90,7 @@ export function getWebmailHtml(): string {
 </div>
 
 <div id="compose">
-  <div class="compose-header" onclick="toggleCompose()">
+  <div class="compose-header" id="composeHeader">
     <span>New Message</span>
     <span id="closeCompose" style="cursor:pointer;">x</span>
   </div>
@@ -99,7 +101,7 @@ export function getWebmailHtml(): string {
     <input id="composeFiles" type="file" multiple />
     <div class="compose-file-hint">Attach up to 10 files, max 20 MB total.</div>
     <div style="display:flex;gap:8px;">
-      <button class="btn btn-primary" onclick="doSend()">Send</button>
+      <button class="btn btn-primary" id="sendBtn">Send</button>
       <div id="sendStatus" style="font-size:12px;color:#64748b;align-self:center;"></div>
     </div>
   </div>
@@ -116,14 +118,107 @@ export function getWebmailHtml(): string {
   }
 
   function quotedBlock(metaLabel, addr, timestamp, bodyText) {
-    const intro = '\n\n--- Original message ---\n';
+    const intro = '\\n\\n--- Original message ---\\n';
     const when = timestamp ? new Date(timestamp).toLocaleString() : '';
-    const header = metaLabel + ': ' + String(addr || '') + (when ? ('\nDate: ' + when) : '') + '\n\n';
+    const header = metaLabel + ': ' + String(addr || '') + (when ? ('\\nDate: ' + when) : '') + '\\n\\n';
     const content = String(bodyText || '(empty)')
-      .split('\n')
+      .split('\\n')
       .map((line) => '> ' + line)
-      .join('\n');
+      .join('\\n');
     return intro + header + content;
+  }
+
+  function bindUiEvents() {
+    const loginForm = document.getElementById('loginForm');
+    if (loginForm) {
+      loginForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        doLogin();
+      });
+    }
+
+    const loginBtn = document.getElementById('loginBtn');
+    if (loginBtn) {
+      loginBtn.addEventListener('click', () => {
+        doLogin();
+      });
+    }
+
+    const loginPass = document.getElementById('loginPass');
+    if (loginPass) {
+      loginPass.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          doLogin();
+        }
+      });
+    }
+
+    document.querySelectorAll('.folder-btn[data-folder]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const folder = btn.getAttribute('data-folder') || 'inbox';
+        loadFolder(folder, btn);
+      });
+    });
+
+    const composeOpenBtn = document.getElementById('composeOpenBtn');
+    if (composeOpenBtn) {
+      composeOpenBtn.addEventListener('click', () => {
+        openCompose();
+      });
+    }
+
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', () => {
+        logout();
+      });
+    }
+
+    const composeHeader = document.getElementById('composeHeader');
+    if (composeHeader) {
+      composeHeader.addEventListener('click', () => {
+        toggleCompose();
+      });
+    }
+
+    const sendBtn = document.getElementById('sendBtn');
+    if (sendBtn) {
+      sendBtn.addEventListener('click', () => {
+        doSend();
+      });
+    }
+
+    const list = document.getElementById('list');
+    if (list) {
+      list.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+
+        const row = target.closest('.email-row[data-email-id]');
+        if (!row) return;
+
+        const id = Number(row.getAttribute('data-email-id'));
+        if (Number.isFinite(id) && id > 0) {
+          loadEmail(id);
+        }
+      });
+    }
+
+    const viewer = document.getElementById('viewer');
+    if (viewer) {
+      viewer.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+
+        const downloadBtn = target.closest('.download-attachment-btn[data-attachment-id]');
+        if (!downloadBtn) return;
+
+        const id = Number(downloadBtn.getAttribute('data-attachment-id'));
+        if (Number.isFinite(id) && id > 0) {
+          downloadAttachment(id);
+        }
+      });
+    }
   }
 
   async function doLogin() {
@@ -172,6 +267,7 @@ export function getWebmailHtml(): string {
     showLogin();
   }
 
+  bindUiEvents();
   bootstrapSession();
 
   async function loadFolder(folder, btn) {
@@ -210,7 +306,7 @@ export function getWebmailHtml(): string {
       const ts = e.received_at || e.sent_at || new Date().toISOString();
       const unreadClass = e.read ? '' : 'unread';
 
-      return '\n        <div class="email-row ' + unreadClass + '" onclick="loadEmail(' + Number(e.id) + ')">\n          <div class="email-from">' + senderOrRecipient + '</div>\n          <div class="email-subject">' + esc(e.subject || '(no subject)') + '</div>\n          <div class="email-date">' + new Date(ts).toLocaleString() + '</div>\n        </div>\n      ';
+      return '\\n        <div class="email-row ' + unreadClass + '" data-email-id="' + Number(e.id) + '">\\n          <div class="email-from">' + senderOrRecipient + '</div>\\n          <div class="email-subject">' + esc(e.subject || '(no subject)') + '</div>\\n          <div class="email-date">' + new Date(ts).toLocaleString() + '</div>\\n        </div>\\n      ';
     }).join('');
   }
 
@@ -224,7 +320,7 @@ export function getWebmailHtml(): string {
 
       const sent = await res.json();
       const sentDate = sent.sent_at ? new Date(sent.sent_at).toLocaleString() : '(unknown)';
-      document.getElementById('viewer').innerHTML = '\n        <div class="viewer-header">\n          <div class="viewer-subject">' + esc(sent.subject || '(no subject)') + '</div>\n          <div class="viewer-meta">\n            To: ' + esc(sent.to_address || '') + '<br>\n            Date: ' + esc(sentDate) + '\n          </div>\n          <div style="margin-top:8px;display:flex;gap:8px;">\n            <button class="btn btn-primary" id="replySentBtn">Reply</button>\n            <button class="btn btn-primary" id="forwardSentBtn">Forward</button>\n          </div>\n        </div>\n        <div class="viewer-body">' + renderBody(sent) + '</div>\n        ' + renderAttachments(sent.attachments || []) + '\n      ';
+      document.getElementById('viewer').innerHTML = '\\n        <div class="viewer-header">\\n          <div class="viewer-subject">' + esc(sent.subject || '(no subject)') + '</div>\\n          <div class="viewer-meta">\\n            To: ' + esc(sent.to_address || '') + '<br>\\n            Date: ' + esc(sentDate) + '\\n          </div>\\n          <div style="margin-top:8px;display:flex;gap:8px;">\\n            <button class="btn btn-primary" id="replySentBtn">Reply</button>\\n            <button class="btn btn-primary" id="forwardSentBtn">Forward</button>\\n          </div>\\n        </div>\\n        <div class="viewer-body">' + renderBody(sent) + '</div>\\n        ' + renderAttachments(sent.attachments || []) + '\\n      ';
 
       const replySentBtn = document.getElementById('replySentBtn');
       if (replySentBtn) {
@@ -252,7 +348,7 @@ export function getWebmailHtml(): string {
     const email = await res.json();
     const safeFrom = esc(email.from_name ? (email.from_name + ' <' + email.from_address + '>') : email.from_address);
 
-    document.getElementById('viewer').innerHTML = '\n      <div class="viewer-header">\n        <div class="viewer-subject">' + esc(email.subject || '(no subject)') + '</div>\n        <div class="viewer-meta">\n          From: ' + safeFrom + '<br>\n          To: ' + esc(email.to_address) + '<br>\n          Date: ' + new Date(email.received_at).toLocaleString() + '\n        </div>\n        <div style="margin-top:8px;display:flex;gap:8px;">\n          <button class="btn btn-primary" id="replyInboxBtn">Reply</button>\n          <button class="btn btn-primary" id="forwardInboxBtn">Forward</button>\n          <button class="btn btn-danger" id="deleteInboxBtn">Delete</button>\n        </div>\n      </div>\n      <div class="viewer-body">' + renderBody(email) + '</div>\n      ' + renderAttachments(email.attachments || []) + '\n    ';
+    document.getElementById('viewer').innerHTML = '\\n      <div class="viewer-header">\\n        <div class="viewer-subject">' + esc(email.subject || '(no subject)') + '</div>\\n        <div class="viewer-meta">\\n          From: ' + safeFrom + '<br>\\n          To: ' + esc(email.to_address) + '<br>\\n          Date: ' + new Date(email.received_at).toLocaleString() + '\\n        </div>\\n        <div style="margin-top:8px;display:flex;gap:8px;">\\n          <button class="btn btn-primary" id="replyInboxBtn">Reply</button>\\n          <button class="btn btn-primary" id="forwardInboxBtn">Forward</button>\\n          <button class="btn btn-danger" id="deleteInboxBtn">Delete</button>\\n        </div>\\n      </div>\\n      <div class="viewer-body">' + renderBody(email) + '</div>\\n      ' + renderAttachments(email.attachments || []) + '\\n    ';
 
     const replyInboxBtn = document.getElementById('replyInboxBtn');
     if (replyInboxBtn) {
@@ -275,8 +371,8 @@ export function getWebmailHtml(): string {
       });
     }
 
-    document.querySelectorAll('.email-row').forEach((r) => {
-      if ((r.getAttribute('onclick') || '').includes('loadEmail(' + Number(email.id) + ')')) {
+    document.querySelectorAll('.email-row[data-email-id]').forEach((r) => {
+      if (Number(r.getAttribute('data-email-id')) === Number(email.id)) {
         r.classList.remove('unread');
       }
     });
@@ -299,7 +395,7 @@ export function getWebmailHtml(): string {
       const id = Number(attachment.id);
       const filename = String(attachment.filename || 'attachment');
       const size = formatBytes(Number(attachment.size_bytes || 0));
-      return '<div class="attachment-item"><div class="attachment-meta"><div class="attachment-name">' + esc(filename) + '</div><div class="attachment-size">' + esc(size) + '</div></div><button class="btn btn-secondary" onclick="downloadAttachment(' + id + ')">Download</button></div>';
+      return '<div class="attachment-item"><div class="attachment-meta"><div class="attachment-name">' + esc(filename) + '</div><div class="attachment-size">' + esc(size) + '</div></div><button class="btn btn-secondary download-attachment-btn" data-attachment-id="' + id + '">Download</button></div>';
     }).join('') + '</div>';
   }
 
@@ -474,18 +570,6 @@ export function getWebmailHtml(): string {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
-  // Expose inline onclick handlers on the global window object
-  // so inline attributes like onclick="doLogin()" resolve.
-  Object.assign(window, {
-    doLogin,
-    logout,
-    loadFolder,
-    openCompose,
-    toggleCompose,
-    doSend,
-    loadEmail,
-    downloadAttachment,
-  });
 </script>
 </body>
 </html>`;

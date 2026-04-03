@@ -226,6 +226,7 @@ app.use(
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
+      fontSrc: ["'self'", 'data:'],
       connectSrc: ["'self'"],
       imgSrc: ["'self'", 'data:', 'blob:'],
       frameSrc: ["'self'"],
@@ -238,6 +239,7 @@ app.use(
 
 app.get('/', (c) => c.html(getWebmailHtml()));
 app.get('/index.html', (c) => c.html(getWebmailHtml()));
+app.get('/favicon.ico', (c) => c.body(null, 204));
 
 const api = new Hono<AppBindings>();
 
