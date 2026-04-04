@@ -105,32 +105,13 @@ export function getLoginHtml(): string {
       font-size: 13px;
       color: var(--danger);
     }
-
-    .footnote {
-      font-size: 12px;
-      color: var(--muted);
-    }
-
-    .route-chip {
-      display: inline-flex;
-      border-radius: 999px;
-      border: 1px solid #c6d8e9;
-      background: #edf5fd;
-      color: #244663;
-      font-size: 11px;
-      padding: 2px 8px;
-      margin-left: 4px;
-      vertical-align: middle;
-    }
   </style>
 </head>
 <body>
   <main class="card">
-    <h1>Unified Login</h1>
+    <h1>Login</h1>
     <p class="subtitle">
-      Sign in once to access your mailbox and admin tools.
-      Mailbox route:
-      <span class="route-chip">/mail</span>
+      Sign in to access your mailbox.
     </p>
 
     <form id="loginForm">
@@ -140,7 +121,6 @@ export function getLoginHtml(): string {
     </form>
 
     <div id="status" class="status"></div>
-    <div class="footnote">Admins can continue to <strong>/admin</strong> after signing in.</div>
   </main>
 
   <script>
