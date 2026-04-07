@@ -210,6 +210,75 @@ describe('worker HTTP API integration', () => {
     expect(afterLogout.status).toBe(401);
   });
 
+  it('allows authenticated users to change their own password', async () => {
+    const user = await seedUser({
+      username: 'self-password-user',
+      email: 'self-password-user@mail.example.test',
+      password: 'Initial-Self-Pass-123',
+    });
+
+    const initialLogin = await login(user.username, user.password);
+    expect(initialLogin.response.status).toBe(200);
+    expect(initialLogin.cookie).not.toBeNull();
+
+    const updatedPassword = 'Updated-Self-Pass-456';
+    const changeResponse = await apiRequest('/api/me/password', {
+      method: 'POST',
+      headers: {
+        Cookie: initialLogin.cookie as string,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        newPassword: updatedPassword,
+      }),
+    });
+
+    expect(changeResponse.status).toBe(200);
+    expect((await readJson<{ ok: boolean }>(changeResponse)).ok).toBe(true);
+
+    const oldPasswordLogin = await login(user.username, user.password);
+    expect(oldPasswordLogin.response.status).toBe(401);
+
+    const newPasswordLogin = await login(user.username, updatedPassword);
+    expect(newPasswordLogin.response.status).toBe(200);
+  });
+
+  it('rejects self password changes when unchanged or invalid', async () => {
+    const session = await createAuthenticatedSession({
+      username: 'self-password-validation-user',
+      email: 'self-password-validation-user@mail.example.test',
+      password: 'Validation-Current-Pass-123',
+    });
+
+    const unchangedPassword = await apiRequest('/api/me/password', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        newPassword: session.password,
+      }),
+    });
+
+    expect(unchangedPassword.status).toBe(400);
+    expect((await readJson<{ error: string }>(unchangedPassword)).error).toContain('different');
+
+    const invalidPayload = await apiRequest('/api/me/password', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        newPassword: 'short',
+      }),
+    });
+
+    expect(invalidPayload.status).toBe(400);
+    expect((await readJson<{ error: string }>(invalidPayload)).error).toContain('newPassword');
+  });
+
   it('throttles repeated failed logins per client IP and username', async () => {
     const user = await seedUser({
       username: 'throttle-user',

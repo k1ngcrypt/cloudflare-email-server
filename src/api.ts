@@ -116,6 +116,10 @@ const adminUserUpdateSchema = z.object({
   emails: z.array(z.string()).optional().default([]),
 });
 
+const selfPasswordUpdateSchema = z.object({
+  newPassword: z.string().min(8),
+});
+
 function resolveAllowedOrigin(request: Request, env: Env): string | null {
   const requestOrigin = request.headers.get('Origin');
   if (!requestOrigin) return null;
@@ -812,6 +816,39 @@ api.get('/me', async (c) => {
     role: user.role,
   });
 });
+
+api.post(
+  '/me/password',
+  zValidator('json', selfPasswordUpdateSchema, (result, c) => {
+    if (!result.success) {
+      return c.json({ error: 'newPassword is required (minimum 8 characters)' }, 400);
+    }
+  }),
+  async (c) => {
+    const user = c.get('user');
+    const body = c.req.valid('json');
+
+    const existingUser = await c.env.DB.prepare('SELECT password_hash FROM users WHERE id = ?')
+      .bind(user.id)
+      .first<{ password_hash: string }>();
+
+    if (!existingUser) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    const matchesExisting = await verifyPassword(body.newPassword, existingUser.password_hash);
+    if (matchesExisting) {
+      return c.json({ error: 'New password must be different from current password' }, 400);
+    }
+
+    const nextPasswordHash = await hashPassword(body.newPassword);
+    await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .bind(nextPasswordHash, user.id)
+      .run();
+
+    return c.json({ ok: true });
+  }
+);
 
 api.get('/attachments/:id/download', async (c) => {
   const user = c.get('user');

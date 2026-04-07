@@ -467,6 +467,47 @@ export function getWebmailHtml(): string {
       color: #0f172a;
     }
 
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 260;
+      background: rgba(15, 23, 42, 0.36);
+      backdrop-filter: blur(2px);
+      align-items: center;
+      justify-content: center;
+      padding: 14px;
+    }
+
+    .modal-card {
+      width: min(420px, 100%);
+      background: #fff;
+      border: 1px solid #dbe6f1;
+      border-radius: 14px;
+      box-shadow: 0 20px 44px rgba(15, 23, 42, 0.24);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .modal-title {
+      font-size: 19px;
+      font-weight: 800;
+      color: #0f2238;
+    }
+
+    .modal-sub {
+      color: #5f7388;
+      font-size: 12px;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
     @media (max-width: 980px) {
       #app {
         height: auto;
@@ -581,6 +622,7 @@ export function getWebmailHtml(): string {
     <div style="flex:1;"></div>
     <button class="btn btn-primary" id="composeOpenBtn" style="width:100%;">Compose</button>
     <button class="folder-btn" id="adminConsoleBtn" style="margin-top:6px;display:none;"><span>Admin Console</span></button>
+    <button class="folder-btn" id="changePasswordBtn" style="margin-top:6px;"><span>Change Password</span></button>
     <button class="folder-btn" id="logoutBtn" style="margin-top:6px;"><span>Sign Out</span></button>
   </div>
 
@@ -627,6 +669,22 @@ export function getWebmailHtml(): string {
       <button class="btn btn-secondary" id="discardDraftBtn" type="button">Discard</button>
       <div id="sendStatus"></div>
     </div>
+  </div>
+</div>
+
+<div id="passwordModal" class="modal-overlay" aria-hidden="true">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="passwordModalTitle">
+    <div class="modal-title" id="passwordModalTitle">Change Password</div>
+    <div class="modal-sub">Your active session authorizes this change. New passwords must be at least 8 characters.</div>
+    <form id="passwordChangeForm" style="display:flex;flex-direction:column;gap:10px;">
+      <input id="newPasswordInput" type="password" placeholder="New password" autocomplete="new-password" />
+      <input id="confirmPasswordInput" type="password" placeholder="Confirm new password" autocomplete="new-password" />
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="cancelPasswordBtn" type="button">Cancel</button>
+        <button class="btn btn-primary" id="savePasswordBtn" type="submit">Update Password</button>
+      </div>
+    </form>
+    <div id="passwordChangeStatus" style="font-size:12px;min-height:16px;color:#607489;"></div>
   </div>
 </div>
 
@@ -785,6 +843,104 @@ export function getWebmailHtml(): string {
 
     status.textContent = String(message || '');
     status.style.color = isError ? '#dc2626' : '#607489';
+  }
+
+  function setPasswordChangeStatus(message, tone) {
+    const status = byId('passwordChangeStatus');
+    if (!status) return;
+
+    const resolvedTone = tone === 'error' || tone === 'success' ? tone : 'neutral';
+    status.textContent = String(message || '');
+    status.style.color = resolvedTone === 'error'
+      ? '#dc2626'
+      : (resolvedTone === 'success' ? '#166534' : '#607489');
+  }
+
+  function resetPasswordChangeForm() {
+    const newPasswordInput = byId('newPasswordInput');
+    const confirmPasswordInput = byId('confirmPasswordInput');
+
+    if (newPasswordInput) newPasswordInput.value = '';
+    if (confirmPasswordInput) confirmPasswordInput.value = '';
+
+    setPasswordChangeStatus('', 'neutral');
+  }
+
+  function openPasswordModal() {
+    const modal = byId('passwordModal');
+    if (!modal) return;
+
+    resetPasswordChangeForm();
+    modal.style.display = 'flex';
+    modal.setAttribute('aria-hidden', 'false');
+
+    const newPasswordInput = byId('newPasswordInput');
+    if (newPasswordInput) newPasswordInput.focus();
+  }
+
+  function closePasswordModal() {
+    const modal = byId('passwordModal');
+    if (!modal) return;
+
+    modal.style.display = 'none';
+    modal.setAttribute('aria-hidden', 'true');
+    resetPasswordChangeForm();
+  }
+
+  async function submitPasswordChange() {
+    const newPasswordInput = byId('newPasswordInput');
+    const confirmPasswordInput = byId('confirmPasswordInput');
+    const savePasswordBtn = byId('savePasswordBtn');
+
+    const newPassword = newPasswordInput ? String(newPasswordInput.value || '') : '';
+    const confirmPassword = confirmPasswordInput ? String(confirmPasswordInput.value || '') : '';
+
+    if (!newPassword || !confirmPassword) {
+      setPasswordChangeStatus('Both password fields are required.', 'error');
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      setPasswordChangeStatus('New password must be at least 8 characters.', 'error');
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setPasswordChangeStatus('New password and confirmation do not match.', 'error');
+      return;
+    }
+
+    if (savePasswordBtn) {
+      savePasswordBtn.disabled = true;
+    }
+
+    setPasswordChangeStatus('Updating password...', 'neutral');
+
+    try {
+      const res = await apiFetch('/api/me/password', 'POST', {
+        newPassword,
+      });
+
+      if (res.status === 401) {
+        logout();
+        return;
+      }
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setPasswordChangeStatus(data.error || 'Failed to update password.', 'error');
+        return;
+      }
+
+      setPasswordChangeStatus('Password updated successfully.', 'success');
+      setTimeout(() => {
+        closePasswordModal();
+      }, 700);
+    } finally {
+      if (savePasswordBtn) {
+        savePasswordBtn.disabled = false;
+      }
+    }
   }
 
   function addSubjectPrefix(subject, prefix) {
@@ -1776,6 +1932,7 @@ export function getWebmailHtml(): string {
     viewerContext = null;
     setSenderAddressesFromPayload({});
     setCurrentUserRole('user');
+    closePasswordModal();
     window.location.href = '/login';
   }
 
@@ -1837,6 +1994,37 @@ export function getWebmailHtml(): string {
     if (adminConsoleBtn) {
       adminConsoleBtn.addEventListener('click', () => {
         window.location.href = '/admin';
+      });
+    }
+
+    const changePasswordBtn = byId('changePasswordBtn');
+    if (changePasswordBtn) {
+      changePasswordBtn.addEventListener('click', () => {
+        openPasswordModal();
+      });
+    }
+
+    const passwordChangeForm = byId('passwordChangeForm');
+    if (passwordChangeForm) {
+      passwordChangeForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submitPasswordChange();
+      });
+    }
+
+    const cancelPasswordBtn = byId('cancelPasswordBtn');
+    if (cancelPasswordBtn) {
+      cancelPasswordBtn.addEventListener('click', () => {
+        closePasswordModal();
+      });
+    }
+
+    const passwordModal = byId('passwordModal');
+    if (passwordModal) {
+      passwordModal.addEventListener('click', (event) => {
+        if (event.target === passwordModal) {
+          closePasswordModal();
+        }
       });
     }
 
@@ -1995,6 +2183,17 @@ export function getWebmailHtml(): string {
 
     window.addEventListener('resize', () => {
       syncMobilePaneFromSelection();
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+
+      const modal = byId('passwordModal');
+      if (modal && modal.style.display === 'flex') {
+        closePasswordModal();
+      }
     });
   }
 
