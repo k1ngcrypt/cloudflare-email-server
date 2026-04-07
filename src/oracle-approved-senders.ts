@@ -577,38 +577,62 @@ export async function ensureApprovedSenders(env: Env, emailAddresses: string[]):
 
 export async function removeApprovedSenders(env: Env, emailAddresses: string[]): Promise<void> {
   const uniqueEmailAddresses = normalizeUniqueEmailAddresses(emailAddresses);
+  if (uniqueEmailAddresses.length === 0) {
+    return;
+  }
 
   const senderByEmail = new Map<string, SenderSummary>();
-  const unresolvedEmailAddresses: string[] = [];
 
-  const filteredLookupResults = await Promise.all(
-    uniqueEmailAddresses.map(async (emailAddress) => {
-      const sender = await findApprovedSenderInPages(env, emailAddress, {
-        emailFilter: emailAddress,
-      });
 
-      return { emailAddress, sender };
-    })
-  );
 
-  for (const result of filteredLookupResults) {
-    if (result.sender) {
-      senderByEmail.set(result.emailAddress, result.sender);
-      continue;
+
+
+
+  let unresolvedEmailAddresses = uniqueEmailAddresses;
+
+  if (uniqueEmailAddresses.length > 1) {
+    const unfilteredSenderByEmail = await findApprovedSendersInUnfilteredPages(env, uniqueEmailAddresses);
+    unresolvedEmailAddresses = [];
+
+    for (const emailAddress of uniqueEmailAddresses) {
+      const sender = unfilteredSenderByEmail.get(emailAddress);
+      if (sender) {
+        senderByEmail.set(emailAddress, sender);
+        continue;
+      }
+
+      unresolvedEmailAddresses.push(emailAddress);
     }
-
-    unresolvedEmailAddresses.push(result.emailAddress);
   }
 
   if (unresolvedEmailAddresses.length > 0) {
-    // Some OCI tenancies can return incomplete filtered results; scan pages once
-    // for all unresolved email addresses before concluding they are absent.
-    const fallbackSenderByEmail = await findApprovedSendersInUnfilteredPages(
-      env,
-      unresolvedEmailAddresses
+    const filteredLookupResults = await Promise.all(
+      unresolvedEmailAddresses.map(async (emailAddress) => {
+        const sender = await findApprovedSenderInPages(env, emailAddress, {
+          emailFilter: emailAddress,
+        });
+
+        return { emailAddress, sender };
+      })
     );
 
-    for (const emailAddress of unresolvedEmailAddresses) {
+    for (const result of filteredLookupResults) {
+      if (result.sender) {
+        senderByEmail.set(result.emailAddress, result.sender);
+      }
+    }
+  }
+
+  const unresolvedAfterFiltered = uniqueEmailAddresses.filter(
+    (emailAddress) => !senderByEmail.has(emailAddress)
+  );
+
+  if (unresolvedAfterFiltered.length > 0) {
+    // Some OCI tenancies can return incomplete filtered results; do one final
+    // unfiltered scan for unresolved addresses before treating them as absent.
+    const fallbackSenderByEmail = await findApprovedSendersInUnfilteredPages(env, unresolvedAfterFiltered);
+
+    for (const emailAddress of unresolvedAfterFiltered) {
       const fallbackSender = fallbackSenderByEmail.get(emailAddress);
       if (fallbackSender) {
         senderByEmail.set(emailAddress, fallbackSender);
@@ -619,6 +643,10 @@ export async function removeApprovedSenders(env: Env, emailAddresses: string[]):
   const emailAddressesWithSender = uniqueEmailAddresses.filter((emailAddress) =>
     senderByEmail.has(emailAddress)
   );
+
+  if (emailAddressesWithSender.length === 0) {
+    return;
+  }
 
   await Promise.all(
     emailAddressesWithSender.map((emailAddress) =>

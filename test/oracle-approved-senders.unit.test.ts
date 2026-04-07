@@ -220,7 +220,7 @@ describe('removeApprovedSenders', () => {
         entry.requestUrl.pathname.endsWith('/senders') &&
         Boolean(entry.requestUrl.searchParams.get('emailAddress'))
     );
-    expect(filteredListRequests).toHaveLength(2);
+    expect(filteredListRequests).toHaveLength(0);
 
     const unfilteredListRequests = requests.filter(
       (entry) => entry.method === 'GET' &&

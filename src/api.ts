@@ -361,7 +361,12 @@ async function setUserRole(env: Env, userId: number, role: UserRole): Promise<vo
     .run();
 }
 
-async function replaceUserEmailAddresses(env: Env, userId: number, emails: string[]): Promise<void> {
+async function replaceUserEmailAddresses(
+  env: Env,
+  userId: number,
+  emails: string[],
+  options: { syncPrimaryUserEmail?: boolean } = {}
+): Promise<void> {
   await env.DB.prepare('DELETE FROM user_addresses WHERE user_id = ?')
     .bind(userId)
     .run();
@@ -379,9 +384,11 @@ async function replaceUserEmailAddresses(env: Env, userId: number, emails: strin
     );
   }
 
-  await env.DB.prepare('UPDATE users SET email = ? WHERE id = ?')
-    .bind(emails[0], userId)
-    .run();
+  if (options.syncPrimaryUserEmail !== false) {
+    await env.DB.prepare('UPDATE users SET email = ? WHERE id = ?')
+      .bind(emails[0], userId)
+      .run();
+  }
 }
 
 async function countAdminUsers(env: Env): Promise<number> {
@@ -1327,27 +1334,34 @@ api.post(
         `
           INSERT INTO users (username, email, password_hash)
           VALUES (?, ?, ?)
-          RETURNING id
+          RETURNING id, created_at
         `
       )
         .bind(username, desiredEmails[0], passwordHash)
-        .first<{ id: number }>();
+        .first<{ id: number; created_at: string }>();
 
       if (!inserted) {
         throw new Error('Failed to create user');
       }
 
       await Promise.all([
-        replaceUserEmailAddresses(c.env, inserted.id, desiredEmails),
+        replaceUserEmailAddresses(c.env, inserted.id, desiredEmails, {
+          syncPrimaryUserEmail: false,
+        }),
         setUserRole(c.env, inserted.id, body.role),
       ]);
 
-      const createdUser = await getAdminUserById(c.env, inserted.id);
-      if (!createdUser) {
-        throw new Error('Failed to load newly created user');
-      }
-
-      return c.json(createdUser, 201);
+      return c.json(
+        {
+          id: inserted.id,
+          username,
+          role: body.role,
+          primaryEmail: desiredEmails[0],
+          emails: desiredEmails,
+          createdAt: inserted.created_at,
+        },
+        201
+      );
     } catch (err) {
       console.error('User create failed after OCI sender sync:', err);
 
@@ -1416,12 +1430,15 @@ api.put(
     }
 
     const oldEmails = existing.emails;
+    const emailsToEnsure = difference(desiredEmails, oldEmails);
     const emailsToDelete = difference(oldEmails, desiredEmails);
 
     const shouldUpdatePassword = typeof body.password === 'string' && body.password.length > 0;
     const [passwordHashResult, approvedSendersResult] = await Promise.allSettled([
       shouldUpdatePassword ? hashPassword(body.password as string) : Promise.resolve<string | null>(null),
-      ensureApprovedSenders(c.env, desiredEmails),
+      emailsToEnsure.length > 0
+        ? ensureApprovedSenders(c.env, emailsToEnsure)
+        : Promise.resolve<string[]>([]),
     ]);
 
     if (approvedSendersResult.status === 'rejected') {
@@ -1462,8 +1479,8 @@ api.put(
     const nextPasswordHash = passwordHashResult.value;
 
     try {
-      await c.env.DB.prepare('UPDATE users SET username = ?, email = ? WHERE id = ?')
-        .bind(username, desiredEmails[0], userId)
+      await c.env.DB.prepare('UPDATE users SET username = ? WHERE id = ?')
+        .bind(username, userId)
         .run();
 
       await Promise.all([
@@ -1508,17 +1525,15 @@ api.put(
       }
     })();
 
-    const [updated, warning] = await Promise.all([
-      getAdminUserById(c.env, userId),
-      staleSenderWarningPromise,
-    ]);
-
-    if (!updated) {
-      return c.json({ error: 'User disappeared after update' }, 500);
-    }
+    const warning = await staleSenderWarningPromise;
 
     return c.json({
-      ...updated,
+      id: userId,
+      username,
+      role: body.role,
+      primaryEmail: desiredEmails[0],
+      emails: desiredEmails,
+      createdAt: existing.createdAt,
       ...(warning ? { warning } : {}),
     });
   }
