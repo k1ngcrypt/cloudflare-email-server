@@ -384,14 +384,6 @@ async function replaceUserEmailAddresses(env: Env, userId: number, emails: strin
     .run();
 }
 
-async function getUserRole(env: Env, userId: number): Promise<UserRole> {
-  const row = await env.DB.prepare('SELECT role FROM user_roles WHERE user_id = ?')
-    .bind(userId)
-    .first<{ role: string | null }>();
-
-  return normalizeRole(row?.role);
-}
-
 async function countAdminUsers(env: Env): Promise<number> {
   const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM user_roles WHERE role = 'admin'")
     .first<{ count: number }>();
@@ -726,15 +718,25 @@ api.post(
   }
 
   const throttleKey = getLoginThrottleKey(c.req.raw, username);
-  const throttleState = await isLoginBlocked(c.env, throttleKey);
+  const [throttleState, user] = await Promise.all([
+    isLoginBlocked(c.env, throttleKey),
+    c.env.DB.prepare(
+      `
+        SELECT users.id, users.password_hash, COALESCE(user_roles.role, 'user') AS role
+        FROM users
+        LEFT JOIN user_roles ON user_roles.user_id = users.id
+        WHERE users.username = ?
+        LIMIT 1
+      `
+    )
+      .bind(username)
+      .first<{ id: number; password_hash: string; role: string | null }>(),
+  ]);
+
   if (throttleState.blocked) {
     c.header('Retry-After', String(throttleState.retryAfterSeconds));
     return c.json({ error: 'Too many login attempts. Try again later.' }, 429);
   }
-
-  const user = await c.env.DB.prepare('SELECT id, email, password_hash FROM users WHERE username = ?')
-    .bind(username)
-    .first<{ id: number; email: string; password_hash: string }>();
 
   if (!user) {
     return failedLoginResponse(c, throttleKey);
@@ -745,10 +747,9 @@ api.post(
     return failedLoginResponse(c, throttleKey);
   }
 
-  const [session, userAddressSet, userRole] = await Promise.all([
+  const [session, userAddressSet] = await Promise.all([
     createSession(c.env, user.id),
     resolveUserAddressSet(c.env, user.id),
-    getUserRole(c.env, user.id),
     clearLoginAttempts(c.env, throttleKey),
   ]);
 
@@ -765,7 +766,7 @@ api.post(
     email: userAddressSet.primaryEmail,
     emails: userAddressSet.emails,
     username,
-    role: userRole,
+    role: normalizeRole(user.role),
     expiresAt: session.expiresAt,
   });
 });

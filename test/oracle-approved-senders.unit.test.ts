@@ -162,4 +162,113 @@ describe('removeApprovedSenders', () => {
     expect(requestUrls.some((url) => url.searchParams.get('page') === 'page-token-2')).toBe(true);
     expect(requestUrls.some((url) => url.pathname.endsWith('/senders/ocid1.sender.oc1..target'))).toBe(true);
   });
+
+  it('reuses one unfiltered pagination scan for multiple unresolved emails', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestUrl = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      );
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+
+      if (method === 'GET' && requestUrl.pathname.endsWith('/senders')) {
+        const emailAddress = requestUrl.searchParams.get('emailAddress');
+        const page = requestUrl.searchParams.get('page');
+
+        if (emailAddress) {
+          return jsonResponse({ items: [] });
+        }
+
+        if (!page) {
+          return jsonResponse(
+            {
+              items: [
+                {
+                  id: 'ocid1.sender.oc1..first',
+                  emailAddress: 'first@example.test',
+                  lifecycleState: 'ACTIVE',
+                },
+              ],
+            },
+            {
+              headers: {
+                'opc-next-page': 'page-token-2',
+              },
+            }
+          );
+        }
+
+        if (page === 'page-token-2') {
+          return jsonResponse({
+            items: [
+              {
+                id: 'ocid1.sender.oc1..second',
+                emailAddress: 'second@example.test',
+                lifecycleState: 'ACTIVE',
+              },
+            ],
+          });
+        }
+      }
+
+      if (method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..first')) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            etag: 'W/"etag-first"',
+          },
+        });
+      }
+
+      if (method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..second')) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            etag: 'W/"etag-second"',
+          },
+        });
+      }
+
+      if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..first')) {
+        return new Response(null, { status: 204 });
+      }
+
+      if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..second')) {
+        return new Response(null, { status: 204 });
+      }
+
+      return new Response('unexpected request', { status: 500 });
+    });
+
+    await removeApprovedSenders(makeEnv(), ['first@example.test', 'second@example.test']);
+
+    const requests = fetchMock.mock.calls.map((call) => {
+      const input = call[0] as RequestInfo | URL;
+      const init = call[1] as RequestInit | undefined;
+      const requestUrl = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      );
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      return { requestUrl, method };
+    });
+
+    const filteredListRequests = requests.filter(
+      (entry) => entry.method === 'GET' &&
+        entry.requestUrl.pathname.endsWith('/senders') &&
+        Boolean(entry.requestUrl.searchParams.get('emailAddress'))
+    );
+    expect(filteredListRequests).toHaveLength(2);
+
+    const unfilteredListRequests = requests.filter(
+      (entry) => entry.method === 'GET' &&
+        entry.requestUrl.pathname.endsWith('/senders') &&
+        !entry.requestUrl.searchParams.get('emailAddress')
+    );
+    expect(unfilteredListRequests).toHaveLength(2);
+    expect(unfilteredListRequests.some((entry) => entry.requestUrl.searchParams.get('page') === 'page-token-2')).toBe(true);
+
+    const deleteRequests = requests.filter(
+      (entry) => entry.method === 'DELETE' && entry.requestUrl.pathname.includes('/senders/ocid1.sender.oc1..')
+    );
+    expect(deleteRequests).toHaveLength(2);
+  });
 });
