@@ -118,28 +118,10 @@ describe('removeApprovedSenders', () => {
         }
       }
 
-      if (method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
-        return new Response(
-          JSON.stringify({
-            sender: {
-              id: 'ocid1.sender.oc1..target',
-              emailAddress: 'alias@example.test',
-            },
-          }),
-          {
-            status: 200,
-            headers: {
-              'Content-Type': 'application/json',
-              etag: 'W/"sender-etag-1"',
-            },
-          }
-        );
-      }
-
       if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
         expect(requestUrl.searchParams.get('isLockOverride')).toBe('true');
         const headers = new Headers(init?.headers);
-        expect(headers.get('if-match')).toBe('W/"sender-etag-1"');
+        expect(headers.get('if-match')).toBeNull();
         return new Response(null, { status: 204 });
       }
 
@@ -210,24 +192,6 @@ describe('removeApprovedSenders', () => {
         }
       }
 
-      if (method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..first')) {
-        return new Response(null, {
-          status: 200,
-          headers: {
-            etag: 'W/"etag-first"',
-          },
-        });
-      }
-
-      if (method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..second')) {
-        return new Response(null, {
-          status: 200,
-          headers: {
-            etag: 'W/"etag-second"',
-          },
-        });
-      }
-
       if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..first')) {
         return new Response(null, { status: 204 });
       }
@@ -270,5 +234,68 @@ describe('removeApprovedSenders', () => {
       (entry) => entry.method === 'DELETE' && entry.requestUrl.pathname.includes('/senders/ocid1.sender.oc1..')
     );
     expect(deleteRequests).toHaveLength(2);
+  });
+
+  it('retries delete with if-match when OCI requires a precondition', async () => {
+    let deleteAttempts = 0;
+
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestUrl = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      );
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+
+      if (method === 'GET' && requestUrl.pathname.endsWith('/senders')) {
+        return jsonResponse({
+          items: [
+            {
+              id: 'ocid1.sender.oc1..target',
+              emailAddress: 'alias@example.test',
+              lifecycleState: 'ACTIVE',
+            },
+          ],
+        });
+      }
+
+      if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
+        deleteAttempts += 1;
+        const headers = new Headers(init?.headers);
+
+        if (deleteAttempts === 1) {
+          expect(headers.get('if-match')).toBeNull();
+          return new Response('precondition required', { status: 412 });
+        }
+
+        expect(headers.get('if-match')).toBe('W/"sender-etag-1"');
+        return new Response(null, { status: 204 });
+      }
+
+      if (method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            etag: 'W/"sender-etag-1"',
+          },
+        });
+      }
+
+      return new Response('unexpected request', { status: 500 });
+    });
+
+    await removeApprovedSenders(makeEnv(), ['Alias@example.test']);
+
+    expect(deleteAttempts).toBe(2);
+
+    const detailLookupCount = fetchMock.mock.calls.filter((call) => {
+      const input = call[0] as RequestInfo | URL;
+      const init = call[1] as RequestInit | undefined;
+      const requestUrl = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      );
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      return method === 'GET' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target');
+    }).length;
+
+    expect(detailLookupCount).toBe(1);
   });
 });

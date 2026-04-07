@@ -1499,18 +1499,8 @@ api.put(
         return null;
       }
 
-      console.info('Removing stale OCI approved senders during user update', {
-        userId,
-        emails: emailsToDelete,
-      });
-
       try {
         await removeApprovedSenders(c.env, emailsToDelete);
-        console.info('Removed stale OCI approved senders during user update', {
-          userId,
-          removedCount: emailsToDelete.length,
-          emails: emailsToDelete,
-        });
         return null;
       } catch (err) {
         console.error('Failed to remove stale OCI approved senders during user update:', err);
@@ -1557,18 +1547,8 @@ api.delete('/admin/users/:id', async (c) => {
     }
   }
 
-  console.info('Removing OCI approved senders before user delete', {
-    userId,
-    emails: existing.emails,
-  });
-
   try {
     await removeApprovedSenders(c.env, existing.emails);
-    console.info('Removed OCI approved senders before user delete', {
-      userId,
-      removedCount: existing.emails.length,
-      emails: existing.emails,
-    });
   } catch (err) {
     console.error('Failed to remove OCI approved senders during user delete:', err);
     return c.json(
