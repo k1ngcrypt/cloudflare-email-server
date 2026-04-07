@@ -109,11 +109,11 @@ const adminUserCreateSchema = z.object({
 });
 
 const adminUserUpdateSchema = z.object({
-  username: z.string().trim().min(1).max(120),
+  username: z.string().trim().min(1).max(120).optional(),
   password: z.string().min(8).optional(),
-  role: adminRoleSchema,
-  primaryEmail: z.string().trim().min(3),
-  emails: z.array(z.string()).optional().default([]),
+  role: adminRoleSchema.optional(),
+  primaryEmail: z.string().trim().min(3).optional(),
+  emails: z.array(z.string()).optional(),
 });
 
 const selfPasswordUpdateSchema = z.object({
@@ -1386,7 +1386,7 @@ api.put(
   '/admin/users/:id',
   zValidator('json', adminUserUpdateSchema, (result, c) => {
     if (!result.success) {
-      return c.json({ error: 'username, role, and primaryEmail are required' }, 400);
+      return c.json({ error: 'Invalid user update payload' }, 400);
     }
   }),
   async (c) => {
@@ -1401,7 +1401,13 @@ api.put(
       return c.json({ error: 'User not found' }, 404);
     }
 
-    if (existing.role === 'admin' && body.role !== 'admin') {
+    const username = (body.username ?? existing.username).trim();
+    const role: UserRole = body.role ?? existing.role;
+    const existingAliases = existing.emails.filter((email) => email !== existing.primaryEmail);
+    const requestedPrimaryEmail = body.primaryEmail ?? existing.primaryEmail;
+    const requestedAliases = body.emails ?? existingAliases;
+
+    if (existing.role === 'admin' && role !== 'admin') {
       const adminCount = await countAdminUsers(c.env);
       if (adminCount <= 1) {
         return c.json({ error: 'Cannot remove role from the last admin account' }, 400);
@@ -1410,12 +1416,11 @@ api.put(
 
     let desiredEmails: string[];
     try {
-      desiredEmails = normalizeManagedEmails(body.primaryEmail, body.emails ?? []);
+      desiredEmails = normalizeManagedEmails(requestedPrimaryEmail, requestedAliases);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : 'Invalid email list' }, 400);
     }
 
-    const username = body.username.trim();
     const [usernameError, emailError] = await Promise.all([
       validateUsernameAvailability(c.env, username, userId),
       validateEmailAvailability(c.env, desiredEmails, userId),
@@ -1485,7 +1490,7 @@ api.put(
 
       await Promise.all([
         replaceUserEmailAddresses(c.env, userId, desiredEmails),
-        setUserRole(c.env, userId, body.role),
+        setUserRole(c.env, userId, role),
       ]);
 
       if (nextPasswordHash) {
@@ -1530,7 +1535,7 @@ api.put(
     return c.json({
       id: userId,
       username,
-      role: body.role,
+      role,
       primaryEmail: desiredEmails[0],
       emails: desiredEmails,
       createdAt: existing.createdAt,

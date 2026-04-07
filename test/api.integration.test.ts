@@ -893,6 +893,47 @@ describe('worker HTTP API integration', () => {
     );
   });
 
+  it('accepts partial admin user updates without requiring unchanged fields', async () => {
+    const adminSession = await createAuthenticatedSession({
+      username: 'admin-partial-update',
+      email: 'admin-partial-update@mail.example.test',
+      password: 'Admin-Partial-Update-123',
+    });
+
+    const targetUser = await seedUser({
+      username: 'member-partial-update',
+      email: 'member-partial-update@mail.example.test',
+      password: 'Member-Partial-Update-123',
+    });
+
+    const response = await apiRequest(`/api/admin/users/${targetUser.id}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${adminSession.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        username: 'member-partial-updated',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+
+    const payload = await readJson<{
+      id: number;
+      username: string;
+      role: string;
+      primaryEmail: string;
+      emails: string[];
+    }>(response);
+
+    expect(payload.id).toBe(targetUser.id);
+    expect(payload.username).toBe('member-partial-updated');
+    expect(payload.role).toBe('user');
+    expect(payload.primaryEmail).toBe('member-partial-update@mail.example.test');
+    expect(payload.emails).toContain('member-partial-update@mail.example.test');
+  });
+
   it('returns not found for unknown authenticated routes', async () => {
     const session = await createAuthenticatedSession({
       username: 'unknown-route-user',
