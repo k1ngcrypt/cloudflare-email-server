@@ -146,6 +146,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- OCI approved sender cache to avoid repeated control-plane list scans.
+CREATE TABLE IF NOT EXISTS oci_approved_sender_cache (
+  email_address TEXT PRIMARY KEY,
+  sender_id     TEXT NOT NULL,
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_emails_user_folder ON emails(user_id, folder);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at DESC);
@@ -159,3 +166,4 @@ DROP INDEX IF EXISTS idx_user_addresses_single_primary;
 CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_sent ON attachments(sent_email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
+CREATE INDEX IF NOT EXISTS idx_oci_sender_cache_updated_at ON oci_approved_sender_cache(updated_at);

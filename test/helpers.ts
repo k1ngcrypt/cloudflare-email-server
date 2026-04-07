@@ -152,6 +152,13 @@ const SCHEMA_STATEMENTS = [
       updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `,
+  `
+    CREATE TABLE IF NOT EXISTS oci_approved_sender_cache (
+      email_address TEXT PRIMARY KEY,
+      sender_id     TEXT NOT NULL,
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `,
   'CREATE INDEX IF NOT EXISTS idx_emails_user_folder ON emails(user_id, folder)',
   'CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)',
@@ -164,9 +171,11 @@ const SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id)',
   'CREATE INDEX IF NOT EXISTS idx_attachments_sent ON attachments(sent_email_id)',
   'CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id)',
+  'CREATE INDEX IF NOT EXISTS idx_oci_sender_cache_updated_at ON oci_approved_sender_cache(updated_at)',
 ];
 
 const RESET_STATEMENTS = [
+  'DELETE FROM oci_approved_sender_cache',
   'DELETE FROM attachments',
   'DELETE FROM sent_emails',
   'DELETE FROM emails',
