@@ -29,6 +29,10 @@ const OCI_SIGNED_HEADERS = [
 
 type OciSignedHeader = (typeof OCI_SIGNED_HEADERS)[number];
 
+const textEncoder = new TextEncoder();
+let cachedSigningKeyPem: string | null = null;
+let cachedSigningKeyPromise: Promise<CryptoKey> | null = null;
+
 function normalizePemPrivateKey(input: string): string {
   const trimmed = input.trim();
   if (trimmed.includes('\\n')) {
@@ -70,7 +74,7 @@ function parseRecipientList(rawRecipients: string): string[] {
   return recipients;
 }
 
-function buildRawMessage(opts: SendOptions, recipients: string[]): Uint8Array {
+function buildRawMessage(opts: SendOptions, recipients: string[]): string {
   const mimeMessage = createMimeMessage();
   mimeMessage.setSender({ addr: opts.from, name: 'Webmail' });
   mimeMessage.setTo(recipients.map((email) => ({ addr: email })));
@@ -99,7 +103,7 @@ function buildRawMessage(opts: SendOptions, recipients: string[]): Uint8Array {
     });
   }
 
-  return new TextEncoder().encode(mimeMessage.asRaw());
+  return mimeMessage.asRaw();
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -143,8 +147,13 @@ function pemToDerBytes(privateKeyPem: string): Uint8Array {
   return bytes;
 }
 
-async function signOciRequest(signingString: string, privateKeyPem: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
+function getOciSigningKey(privateKeyPem: string): Promise<CryptoKey> {
+  if (cachedSigningKeyPromise && cachedSigningKeyPem === privateKeyPem) {
+    return cachedSigningKeyPromise;
+  }
+
+  cachedSigningKeyPem = privateKeyPem;
+  cachedSigningKeyPromise = crypto.subtle.importKey(
     'pkcs8',
     pemToDerBytes(privateKeyPem) as unknown as BufferSource,
     {
@@ -155,10 +164,21 @@ async function signOciRequest(signingString: string, privateKeyPem: string): Pro
     ['sign']
   );
 
+  cachedSigningKeyPromise.catch(() => {
+    cachedSigningKeyPem = null;
+    cachedSigningKeyPromise = null;
+  });
+
+  return cachedSigningKeyPromise;
+}
+
+async function signOciRequest(signingString: string, privateKeyPem: string): Promise<string> {
+  const key = await getOciSigningKey(privateKeyPem);
+
   const signature = await crypto.subtle.sign(
     'RSASSA-PKCS1-v1_5',
     key,
-    new TextEncoder().encode(signingString)
+    textEncoder.encode(signingString)
   );
   return toBase64(new Uint8Array(signature));
 }
@@ -167,9 +187,10 @@ export async function sendEmail(env: Env, opts: SendOptions): Promise<void> {
   const recipients = parseRecipientList(opts.to);
   const submitUrl = resolveOciSubmitUrl(env.OCI_EMAIL_ENDPOINT);
   const rawMessage = buildRawMessage(opts, recipients);
-  const contentLength = String(rawMessage.byteLength);
+  const rawMessageBytes = textEncoder.encode(rawMessage);
+  const contentLength = String(rawMessageBytes.byteLength);
   const xDate = new Date().toUTCString();
-  const contentHash = await sha256Base64(rawMessage);
+  const contentHash = await sha256Base64(rawMessageBytes);
 
   const signedValues: Record<OciSignedHeader, string> = {
     '(request-target)': `post ${submitUrl.pathname}${submitUrl.search}`,
@@ -204,7 +225,7 @@ export async function sendEmail(env: Env, opts: SendOptions): Promise<void> {
       'X-Content-SHA256': contentHash,
       'X-Date': xDate,
     },
-    body: new TextDecoder().decode(rawMessage),
+    body: rawMessage,
   });
 
   if (!response.ok) {

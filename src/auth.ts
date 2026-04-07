@@ -15,6 +15,10 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 10;
 const LOGIN_BLOCK_MS = 15 * 60 * 1000;
 
+const textEncoder = new TextEncoder();
+let cachedAuthSecret: string | null = null;
+let cachedAuthSecretKeyPromise: Promise<CryptoKey> | null = null;
+
 interface ParsedArgon2Hash {
   memory: number;
   iterations: number;
@@ -33,6 +37,28 @@ export interface SessionInfo {
   token: string;
   expiresAt: string;
   maxAgeSeconds: number;
+}
+
+function getSessionSigningKey(authSecret: string): Promise<CryptoKey> {
+  if (cachedAuthSecretKeyPromise && cachedAuthSecret === authSecret) {
+    return cachedAuthSecretKeyPromise;
+  }
+
+  cachedAuthSecret = authSecret;
+  cachedAuthSecretKeyPromise = crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(authSecret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  cachedAuthSecretKeyPromise.catch(() => {
+    cachedAuthSecret = null;
+    cachedAuthSecretKeyPromise = null;
+  });
+
+  return cachedAuthSecretKeyPromise;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -106,15 +132,8 @@ function parseArgon2Hash(encoded: string): ParsedArgon2Hash | null {
 }
 
 async function sessionTokenHash(env: Env, token: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(env.AUTH_SECRET),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(token));
+  const key = await getSessionSigningKey(env.AUTH_SECRET);
+  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(token));
   return bytesToHex(new Uint8Array(signature));
 }
 
@@ -170,7 +189,7 @@ export async function hashPassword(password: string): Promise<string> {
   const salt = new Uint8Array(ARGON2_SALT_BYTES);
   crypto.getRandomValues(salt);
 
-  const hash = argon2id(new TextEncoder().encode(normalized), salt, {
+  const hash = argon2id(textEncoder.encode(normalized), salt, {
     m: ARGON2_MEMORY_KIB,
     t: ARGON2_ITERATIONS,
     p: ARGON2_PARALLELISM,
@@ -194,7 +213,7 @@ export async function verifyPassword(password: string, storedHash: string): Prom
     return false;
   }
 
-  const derived = argon2id(new TextEncoder().encode(normalized), parsedArgon2.salt, {
+  const derived = argon2id(textEncoder.encode(normalized), parsedArgon2.salt, {
     m: parsedArgon2.memory,
     t: parsedArgon2.iterations,
     p: parsedArgon2.parallelism,

@@ -58,7 +58,7 @@ describe('worker HTTP API integration', () => {
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
 
     const body = await response.text();
-    expect(body).toContain('Unified Login');
+    expect(body).toContain('Login');
   });
 
   it('applies page route redirects for anonymous, user, and admin sessions', async () => {

@@ -200,20 +200,7 @@ async function resolveUserAddressSet(
   env: Env,
   userId: number
 ): Promise<{ primaryEmail: string; emails: string[] }> {
-  const candidates = await listUserEmailAddresses(env, userId);
-
-  const emails: string[] = [];
-  const seen = new Set<string>();
-
-  for (const address of candidates) {
-    const normalized = normalizeEmailAddress(address);
-    if (!normalized || seen.has(normalized)) {
-      continue;
-    }
-
-    seen.add(normalized);
-    emails.push(normalized);
-  }
+  const emails = await listUserEmailAddresses(env, userId);
 
   const primaryEmail = emails[0] ?? '';
   if (!primaryEmail) {
@@ -238,6 +225,16 @@ interface UserIdRow {
 }
 
 interface UserAddressOwnerRow {
+  user_id: number;
+}
+
+interface UserAddressByUserRow {
+  user_id: number;
+  address: string;
+}
+
+interface EmailAddressOwnerRow {
+  address: string;
   user_id: number;
 }
 
@@ -282,6 +279,70 @@ function difference(left: string[], right: string[]): string[] {
   return left.filter((value) => !rightSet.has(value));
 }
 
+function buildSqlPlaceholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(', ');
+}
+
+async function resolveUserAddressSets(
+  env: Env,
+  userIds: number[]
+): Promise<Map<number, { primaryEmail: string; emails: string[] }>> {
+  const uniqueUserIds = Array.from(new Set(userIds.filter((userId) => Number.isSafeInteger(userId) && userId > 0)));
+  const addressSets = new Map<number, { primaryEmail: string; emails: string[] }>();
+
+  if (uniqueUserIds.length === 0) {
+    return addressSets;
+  }
+
+  const placeholders = buildSqlPlaceholders(uniqueUserIds.length);
+  const rows = await env.DB.prepare(
+    `
+      SELECT user_id, address
+      FROM user_addresses
+      WHERE user_id IN (${placeholders})
+      ORDER BY user_id ASC, is_primary DESC, id ASC
+    `
+  )
+    .bind(...uniqueUserIds)
+    .all<UserAddressByUserRow>();
+
+  const emailsByUser = new Map<number, string[]>();
+  const seenByUser = new Map<number, Set<string>>();
+
+  for (const row of rows.results ?? []) {
+    const normalized = normalizeEmailAddress(String(row.address ?? ''));
+    if (!normalized) {
+      continue;
+    }
+
+    const userId = Number(row.user_id);
+    if (!seenByUser.has(userId)) {
+      seenByUser.set(userId, new Set());
+      emailsByUser.set(userId, []);
+    }
+
+    const seen = seenByUser.get(userId) as Set<string>;
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    (emailsByUser.get(userId) as string[]).push(normalized);
+  }
+
+  for (const userId of uniqueUserIds) {
+    const emails = emailsByUser.get(userId) ?? [];
+    const primaryEmail = emails[0] ?? '';
+    if (!primaryEmail) {
+      throw new Error(`User ${userId} has no email addresses configured`);
+    }
+
+    addressSets.set(userId, { primaryEmail, emails });
+  }
+
+  return addressSets;
+}
+
 async function setUserRole(env: Env, userId: number, role: UserRole): Promise<void> {
   await env.DB.prepare(
     `
@@ -301,15 +362,17 @@ async function replaceUserEmailAddresses(env: Env, userId: number, emails: strin
     .bind(userId)
     .run();
 
-  for (let i = 0; i < emails.length; i += 1) {
-    await env.DB.prepare(
-      `
-        INSERT INTO user_addresses (user_id, address, is_primary)
-        VALUES (?, ?, ?)
-      `
-    )
-      .bind(userId, emails[i], i === 0 ? 1 : 0)
-      .run();
+  if (emails.length > 0) {
+    await env.DB.batch(
+      emails.map((email, index) =>
+        env.DB.prepare(
+          `
+            INSERT INTO user_addresses (user_id, address, is_primary)
+            VALUES (?, ?, ?)
+          `
+        ).bind(userId, email, index === 0 ? 1 : 0)
+      )
+    );
   }
 
   await env.DB.prepare('UPDATE users SET email = ? WHERE id = ?')
@@ -351,28 +414,25 @@ async function listAdminUsers(env: Env): Promise<
     `
   ).all<AdminUserRow>();
 
-  const result: Array<{
-    id: number;
-    username: string;
-    role: UserRole;
-    primaryEmail: string;
-    emails: string[];
-    createdAt: string;
-  }> = [];
+  const users = rows.results ?? [];
+  const userIds = users.map((row) => row.id);
+  const addressSets = await resolveUserAddressSets(env, userIds);
 
-  for (const row of rows.results ?? []) {
-    const addressSet = await resolveUserAddressSet(env, row.id);
-    result.push({
+  return users.map((row) => {
+    const addressSet = addressSets.get(row.id);
+    if (!addressSet) {
+      throw new Error(`User ${row.id} has no email addresses configured`);
+    }
+
+    return {
       id: row.id,
       username: row.username,
       role: normalizeRole(row.role),
       primaryEmail: addressSet.primaryEmail,
       emails: addressSet.emails,
       createdAt: row.created_at,
-    });
-  }
-
-  return result;
+    };
+  });
 }
 
 async function getAdminUserById(
@@ -402,7 +462,12 @@ async function getAdminUserById(
     return null;
   }
 
-  const addressSet = await resolveUserAddressSet(env, row.id);
+  const addressSets = await resolveUserAddressSets(env, [row.id]);
+  const addressSet = addressSets.get(row.id);
+  if (!addressSet) {
+    throw new Error(`User ${row.id} has no email addresses configured`);
+  }
+
   return {
     id: row.id,
     username: row.username,
@@ -419,22 +484,6 @@ async function findUserIdByUsername(env: Env, username: string): Promise<number 
     .first<UserIdRow>();
 
   return row?.id ?? null;
-}
-
-async function findOwnerIdByEmail(env: Env, email: string): Promise<number | null> {
-  const normalized = normalizeEmailAddress(email);
-  if (!normalized) {
-    return null;
-  }
-
-  const addressRow = await env.DB.prepare('SELECT user_id FROM user_addresses WHERE address = ? LIMIT 1')
-    .bind(normalized)
-    .first<UserAddressOwnerRow>();
-  if (addressRow) {
-    return addressRow.user_id;
-  }
-
-  return null;
 }
 
 async function validateUsernameAvailability(
@@ -455,10 +504,33 @@ async function validateEmailAvailability(
   emails: string[],
   currentUserId?: number
 ): Promise<string | null> {
-  const ownerIds = await Promise.all(emails.map((email) => findOwnerIdByEmail(env, email)));
+  if (emails.length === 0) {
+    return null;
+  }
+
+  const placeholders = buildSqlPlaceholders(emails.length);
+  const rows = await env.DB.prepare(
+    `
+      SELECT address, user_id
+      FROM user_addresses
+      WHERE address IN (${placeholders})
+    `
+  )
+    .bind(...emails)
+    .all<EmailAddressOwnerRow>();
+
+  const ownerByEmail = new Map<string, number>();
+  for (const row of rows.results ?? []) {
+    const normalized = normalizeEmailAddress(String(row.address ?? ''));
+    if (!normalized) {
+      continue;
+    }
+
+    ownerByEmail.set(normalized, row.user_id);
+  }
 
   for (let i = 0; i < emails.length; i += 1) {
-    const ownerId = ownerIds[i];
+    const ownerId = ownerByEmail.get(emails[i]) ?? null;
     if (ownerId !== null && ownerId !== currentUserId) {
       return `${emails[i]} is already assigned to another user`;
     }
@@ -669,9 +741,13 @@ api.post(
     return failedLoginResponse(c, throttleKey);
   }
 
-  await clearLoginAttempts(c.env, throttleKey);
+  const [session, userAddressSet, userRole] = await Promise.all([
+    createSession(c.env, user.id),
+    resolveUserAddressSet(c.env, user.id),
+    getUserRole(c.env, user.id),
+    clearLoginAttempts(c.env, throttleKey),
+  ]);
 
-  const session = await createSession(c.env, user.id);
   setCookie(c, getSessionCookieName(), session.token, {
     maxAge: session.maxAgeSeconds,
     httpOnly: true,
@@ -679,9 +755,6 @@ api.post(
     sameSite: 'Strict',
     secure: true,
   });
-
-  const userAddressSet = await resolveUserAddressSet(c.env, user.id);
-  const userRole = await getUserRole(c.env, user.id);
 
   return c.json({
     token: session.token,
@@ -1383,8 +1456,11 @@ api.put(
       return c.json({ error: 'Failed to update user' }, 500);
     }
 
-    let warning: string | null = null;
-    if (emailsToDelete.length > 0) {
+    const staleSenderWarningPromise: Promise<string | null> = (async () => {
+      if (emailsToDelete.length === 0) {
+        return null;
+      }
+
       console.info('Removing stale OCI approved senders during user update', {
         userId,
         emails: emailsToDelete,
@@ -1397,13 +1473,18 @@ api.put(
           removedCount: emailsToDelete.length,
           emails: emailsToDelete,
         });
+        return null;
       } catch (err) {
         console.error('Failed to remove stale OCI approved senders during user update:', err);
-        warning = err instanceof Error ? err.message : 'Failed to remove old OCI approved senders';
+        return err instanceof Error ? err.message : 'Failed to remove old OCI approved senders';
       }
-    }
+    })();
 
-    const updated = await getAdminUserById(c.env, userId);
+    const [updated, warning] = await Promise.all([
+      getAdminUserById(c.env, userId),
+      staleSenderWarningPromise,
+    ]);
+
     if (!updated) {
       return c.json({ error: 'User disappeared after update' }, 500);
     }
