@@ -23,10 +23,10 @@ describe('auth helper behavior', () => {
     await resetState();
   });
 
-  it('hashes passwords with argon2id and verifies valid/invalid credentials', async () => {
+  it('hashes passwords with SHA-256 and verifies valid/invalid credentials', async () => {
     const hash = await hashPassword('P@ssw0rd!');
 
-    expect(hash.startsWith('argon2id$')).toBe(true);
+    expect(hash).toMatch(/^[a-f0-9]{64}$/i);
 
     const matches = await verifyPassword('P@ssw0rd!', hash);
     const mismatch = await verifyPassword('definitely-wrong', hash);
@@ -35,9 +35,12 @@ describe('auth helper behavior', () => {
     expect(mismatch).toBe(false);
   });
 
-  it('rejects SHA-256 password hashes', async () => {
-    const verified = await verifyPassword('Legacy-Upgrade-Pass-123', 'a'.repeat(64));
-    expect(verified).toBe(false);
+  it('verifies plain SHA-256 password hashes without metadata', async () => {
+    const verified = await verifyPassword(
+      'abc',
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+    );
+    expect(verified).toBe(true);
   });
 
   it('rejects malformed stored password hashes that are not supported', async () => {

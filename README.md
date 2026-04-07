@@ -59,7 +59,7 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 
 ## Security Notes
 
-- Passwords are stored using `argon2id` hashes.
+- Passwords are stored using SHA-256 hashes.
 - RBAC roles are stored in `user_roles` (`admin` or `user`).
 - Accounts can own multiple email addresses in `user_addresses`; the primary address is the row marked with `is_primary = 1`.
 - API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.

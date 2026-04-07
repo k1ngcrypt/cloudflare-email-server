@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@hono/zod-validator": "^0.7.6",
-    "@noble/hashes": "^2.0.1",
     "hono": "^4.12.10",
     "mimetext": "^3.0.23",
     "postal-mime": "^2.4.4",

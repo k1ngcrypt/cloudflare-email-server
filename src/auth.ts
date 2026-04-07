@@ -1,31 +1,16 @@
-import { argon2id } from '@noble/hashes/argon2.js';
 import type { Env } from './index';
 
 const TOKEN_COOKIE_NAME = 'session_token';
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 
-const ARGON2_VERSION = 19;
-const ARGON2_MEMORY_KIB = 19_456;
-const ARGON2_ITERATIONS = 2;
-const ARGON2_PARALLELISM = 1;
-const ARGON2_SALT_BYTES = 16;
-const ARGON2_HASH_BYTES = 32;
-
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 10;
 const LOGIN_BLOCK_MS = 15 * 60 * 1000;
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/i;
 
 const textEncoder = new TextEncoder();
 let cachedAuthSecret: string | null = null;
 let cachedAuthSecretKeyPromise: Promise<CryptoKey> | null = null;
-
-interface ParsedArgon2Hash {
-  memory: number;
-  iterations: number;
-  parallelism: number;
-  salt: Uint8Array;
-  hash: Uint8Array;
-}
 
 interface LoginAttemptRow {
   attempt_count: number;
@@ -75,17 +60,13 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
 function bytesToBase64Url(bytes: Uint8Array): string {
   return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource);
+  return bytesToHex(new Uint8Array(digest));
 }
 
 function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -95,40 +76,6 @@ function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
     diff |= a[i] ^ b[i];
   }
   return diff === 0;
-}
-
-function parseArgon2Hash(encoded: string): ParsedArgon2Hash | null {
-  const match = /^argon2id\$v=(\d+)\$m=(\d+),t=(\d+),p=(\d+)\$([A-Za-z0-9+/=]+)\$([A-Za-z0-9+/=]+)$/.exec(
-    encoded
-  );
-
-  if (!match) return null;
-
-  const version = Number.parseInt(match[1], 10);
-  const memory = Number.parseInt(match[2], 10);
-  const iterations = Number.parseInt(match[3], 10);
-  const parallelism = Number.parseInt(match[4], 10);
-
-  if (
-    version !== ARGON2_VERSION ||
-    Number.isNaN(memory) ||
-    Number.isNaN(iterations) ||
-    Number.isNaN(parallelism)
-  ) {
-    return null;
-  }
-
-  try {
-    return {
-      memory,
-      iterations,
-      parallelism,
-      salt: base64ToBytes(match[5]),
-      hash: base64ToBytes(match[6]),
-    };
-  } catch {
-    return null;
-  }
 }
 
 async function sessionTokenHash(env: Env, token: string): Promise<string> {
@@ -186,42 +133,18 @@ export function getLoginThrottleKey(request: Request, username: string): string 
 
 export async function hashPassword(password: string): Promise<string> {
   const normalized = password.normalize('NFKC');
-  const salt = new Uint8Array(ARGON2_SALT_BYTES);
-  crypto.getRandomValues(salt);
-
-  const hash = argon2id(textEncoder.encode(normalized), salt, {
-    m: ARGON2_MEMORY_KIB,
-    t: ARGON2_ITERATIONS,
-    p: ARGON2_PARALLELISM,
-    dkLen: ARGON2_HASH_BYTES,
-    version: ARGON2_VERSION,
-  });
-
-  return [
-    `argon2id$v=${ARGON2_VERSION}`,
-    `m=${ARGON2_MEMORY_KIB},t=${ARGON2_ITERATIONS},p=${ARGON2_PARALLELISM}`,
-    bytesToBase64(salt),
-    bytesToBase64(hash),
-  ].join('$');
+  return sha256Hex(textEncoder.encode(normalized));
 }
 
 export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
-  const normalized = password.normalize('NFKC');
-  const parsedArgon2 = parseArgon2Hash(storedHash);
-
-  if (!parsedArgon2) {
+  if (!SHA256_HEX_PATTERN.test(storedHash)) {
     return false;
   }
 
-  const derived = argon2id(textEncoder.encode(normalized), parsedArgon2.salt, {
-    m: parsedArgon2.memory,
-    t: parsedArgon2.iterations,
-    p: parsedArgon2.parallelism,
-    dkLen: parsedArgon2.hash.length,
-    version: ARGON2_VERSION,
-  });
+  const normalized = password.normalize('NFKC');
+  const derived = await sha256Hex(textEncoder.encode(normalized));
 
-  return constantTimeEqual(derived, parsedArgon2.hash);
+  return constantTimeEqual(textEncoder.encode(derived), textEncoder.encode(storedHash.toLowerCase()));
 }
 
 export async function createSession(env: Env, userId: number): Promise<SessionInfo> {
