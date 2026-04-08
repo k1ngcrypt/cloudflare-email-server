@@ -68,11 +68,11 @@ describe('worker HTTP API integration', () => {
 
     const anonymousMail = await apiRequest('/mail', { redirect: 'manual' });
     expect(anonymousMail.status).toBe(302);
-    expect(anonymousMail.headers.get('location')).toBe('/login');
+    expect(anonymousMail.headers.get('location')).toBe('/login?next=%2Fmail');
 
     const anonymousAdmin = await apiRequest('/admin', { redirect: 'manual' });
     expect(anonymousAdmin.status).toBe(302);
-    expect(anonymousAdmin.headers.get('location')).toBe('/login');
+    expect(anonymousAdmin.headers.get('location')).toBe('/login?next=%2Fadmin');
 
     const adminSession = await createAuthenticatedSession({
       username: 'admin-route-user',
@@ -88,6 +88,15 @@ describe('worker HTTP API integration', () => {
     });
     expect(loginWhenAuthenticated.status).toBe(302);
     expect(loginWhenAuthenticated.headers.get('location')).toBe('/mail');
+
+    const adminLoginDestination = await apiRequest('/login?next=/admin', {
+      redirect: 'manual',
+      headers: {
+        Cookie: adminSession.cookie,
+      },
+    });
+    expect(adminLoginDestination.status).toBe(302);
+    expect(adminLoginDestination.headers.get('location')).toBe('/admin');
 
     const adminPage = await apiRequest('/admin', {
       headers: {
@@ -106,6 +115,15 @@ describe('worker HTTP API integration', () => {
     const regularLogin = await login(regularUser.username, regularUser.password);
     expect(regularLogin.response.status).toBe(200);
     expect(regularLogin.cookie).not.toBeNull();
+
+    const regularUserAdminDestination = await apiRequest('/login?next=/admin', {
+      redirect: 'manual',
+      headers: {
+        Cookie: regularLogin.cookie as string,
+      },
+    });
+    expect(regularUserAdminDestination.status).toBe(302);
+    expect(regularUserAdminDestination.headers.get('location')).toBe('/mail');
 
     const adminAsRegularUser = await apiRequest('/admin', {
       redirect: 'manual',

@@ -36,7 +36,7 @@ export function getAdminConsoleHtml(): string {
     .login-wrap {
       position: fixed;
       inset: 0;
-      display: flex;
+      display: none;
       align-items: center;
       justify-content: center;
       background: rgba(244, 248, 255, 0.94);
@@ -757,27 +757,6 @@ export function getAdminConsoleHtml(): string {
       setEditMode(user);
     }
 
-    async function doLogin(event) {
-      event.preventDefault();
-      const userInput = byId('loginUser');
-      const passInput = byId('loginPass');
-      const username = userInput ? String(userInput.value || '').trim() : '';
-      const password = passInput ? String(passInput.value || '') : '';
-
-      setStatus('loginStatus', 'Signing in...', '');
-
-      const response = await apiFetch('/api/login', 'POST', { username, password });
-      const result = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        setStatus('loginStatus', result.error || 'Login failed.', 'error');
-        return;
-      }
-
-      setStatus('loginStatus', '', '');
-      await bootstrapSession();
-    }
-
     async function doLogout() {
       try {
         await apiFetch('/api/logout', 'POST');
@@ -825,11 +804,6 @@ export function getAdminConsoleHtml(): string {
     }
 
     function bindEvents() {
-      const loginForm = byId('loginForm');
-      if (loginForm) {
-        loginForm.addEventListener('submit', doLogin);
-      }
-
       const userForm = byId('userForm');
       if (userForm) {
         userForm.addEventListener('submit', createOrUpdateUser);
