@@ -104,7 +104,10 @@ describe('worker HTTP API integration', () => {
       },
     });
     expect(adminPage.status).toBe(200);
-    expect(await adminPage.text()).toContain('User Administration');
+    const adminPageHtml = await adminPage.text();
+    expect(adminPageHtml).toContain('User Administration');
+    expect(adminPageHtml).toContain(".split(/[\\n;]/)");
+    expect(adminPageHtml).toContain("join('\\\\n')");
 
     const regularUser = await seedUser({
       username: 'member-route-user',

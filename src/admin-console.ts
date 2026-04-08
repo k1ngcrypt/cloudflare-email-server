@@ -461,7 +461,7 @@ export function getAdminConsoleHtml(): string {
 
     function splitAliasIdentityLines(raw) {
       return String(raw || '')
-        .split(/[\n;]/)
+        .split(/[\\n;]/)
         .map((part) => String(part || '').trim())
         .filter((part) => part.length > 0);
     }
@@ -565,7 +565,7 @@ export function getAdminConsoleHtml(): string {
             })
         : [];
 
-      if (aliasEmails) aliasEmails.value = aliasIdentityLines.join('\n');
+      if (aliasEmails) aliasEmails.value = aliasIdentityLines.join('\\n');
       if (passwordInput) passwordInput.value = '';
       setStatus('formStatus', '', '');
     }
