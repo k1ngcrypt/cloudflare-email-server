@@ -237,6 +237,11 @@ interface UserAddressByUserRow {
   address: string;
 }
 
+interface UserAddressSenderIdRow {
+  address: string;
+  oci_sender_id: string | null;
+}
+
 interface EmailAddressOwnerRow {
   address: string;
   user_id: number;
@@ -365,8 +370,21 @@ async function replaceUserEmailAddresses(
   env: Env,
   userId: number,
   emails: string[],
-  options: { syncPrimaryUserEmail?: boolean } = {}
+  options: {
+    syncPrimaryUserEmail?: boolean;
+    senderIdByEmail?: ReadonlyMap<string, string>;
+  } = {}
 ): Promise<void> {
+  const senderOcidByEmail = new Map<string, string>();
+  for (const emailAddress of emails) {
+    const senderId = String(options.senderIdByEmail?.get(emailAddress) ?? '').trim();
+    if (!senderId) {
+      throw new Error(`Missing OCI sender OCID for ${emailAddress}`);
+    }
+
+    senderOcidByEmail.set(emailAddress, senderId);
+  }
+
   await env.DB.prepare('DELETE FROM user_addresses WHERE user_id = ?')
     .bind(userId)
     .run();
@@ -376,10 +394,10 @@ async function replaceUserEmailAddresses(
       emails.map((email, index) =>
         env.DB.prepare(
           `
-            INSERT INTO user_addresses (user_id, address, is_primary)
-            VALUES (?, ?, ?)
+            INSERT INTO user_addresses (user_id, address, is_primary, oci_sender_id)
+            VALUES (?, ?, ?, ?)
           `
-        ).bind(userId, email, index === 0 ? 1 : 0)
+        ).bind(userId, email, index === 0 ? 1 : 0, senderOcidByEmail.get(email))
       )
     );
   }
@@ -389,6 +407,32 @@ async function replaceUserEmailAddresses(
       .bind(emails[0], userId)
       .run();
   }
+}
+
+async function listUserSenderIdsByEmail(env: Env, userId: number): Promise<Map<string, string>> {
+  const rows = await env.DB.prepare(
+    `
+      SELECT address, oci_sender_id
+      FROM user_addresses
+      WHERE user_id = ?
+    `
+  )
+    .bind(userId)
+    .all<UserAddressSenderIdRow>();
+
+  const senderIdByEmail = new Map<string, string>();
+
+  for (const row of rows.results ?? []) {
+    const emailAddress = normalizeEmailAddress(String(row.address ?? ''));
+    const senderId = String(row.oci_sender_id ?? '').trim();
+    if (!emailAddress || !senderId) {
+      continue;
+    }
+
+    senderIdByEmail.set(emailAddress, senderId);
+  }
+
+  return senderIdByEmail;
 }
 
 async function countAdminUsers(env: Env): Promise<number> {
@@ -1297,10 +1341,16 @@ api.post(
         approvedSendersResult.reason instanceof ApprovedSenderSyncError
           ? approvedSendersResult.reason.createdAddresses
           : [];
+      const rollbackSenderIdByEmail =
+        approvedSendersResult.reason instanceof ApprovedSenderSyncError
+          ? approvedSendersResult.reason.createdSenderIdByEmail
+          : new Map<string, string>();
 
       if (rollbackAddresses.length > 0) {
         try {
-          await removeApprovedSenders(c.env, rollbackAddresses);
+          await removeApprovedSenders(c.env, rollbackAddresses, {
+            senderIdByEmail: rollbackSenderIdByEmail,
+          });
         } catch (rollbackErr) {
           console.error(
             'Failed to rollback OCI approved senders after create sync error:',
@@ -1327,7 +1377,10 @@ api.post(
     }
 
     const passwordHash = passwordHashResult.value;
-    const createdApprovedSenders = approvedSendersResult.value;
+    const {
+      createdAddresses: createdApprovedSenders,
+      senderIdByEmail: ensuredSenderIdByEmail,
+    } = approvedSendersResult.value;
 
     try {
       const inserted = await c.env.DB.prepare(
@@ -1347,6 +1400,7 @@ api.post(
       await Promise.all([
         replaceUserEmailAddresses(c.env, inserted.id, desiredEmails, {
           syncPrimaryUserEmail: false,
+          senderIdByEmail: ensuredSenderIdByEmail,
         }),
         setUserRole(c.env, inserted.id, body.role),
       ]);
@@ -1367,7 +1421,17 @@ api.post(
 
       if (createdApprovedSenders.length > 0) {
         try {
-          await removeApprovedSenders(c.env, createdApprovedSenders);
+          const createdSenderIdByEmail = new Map<string, string>();
+          for (const emailAddress of createdApprovedSenders) {
+            const senderId = ensuredSenderIdByEmail.get(emailAddress);
+            if (senderId) {
+              createdSenderIdByEmail.set(emailAddress, senderId);
+            }
+          }
+
+          await removeApprovedSenders(c.env, createdApprovedSenders, {
+            senderIdByEmail: createdSenderIdByEmail,
+          });
         } catch (rollbackErr) {
           console.error('Failed to rollback OCI approved senders after user create error:', rollbackErr);
         }
@@ -1400,6 +1464,8 @@ api.put(
     if (!existing) {
       return c.json({ error: 'User not found' }, 404);
     }
+
+    const existingSenderIdByEmail = await listUserSenderIdsByEmail(c.env, userId);
 
     const username = (body.username ?? existing.username).trim();
     const role: UserRole = body.role ?? existing.role;
@@ -1443,7 +1509,7 @@ api.put(
       shouldUpdatePassword ? hashPassword(body.password as string) : Promise.resolve<string | null>(null),
       emailsToEnsure.length > 0
         ? ensureApprovedSenders(c.env, emailsToEnsure)
-        : Promise.resolve<string[]>([]),
+        : Promise.resolve({ createdAddresses: [], senderIdByEmail: new Map<string, string>() }),
     ]);
 
     if (approvedSendersResult.status === 'rejected') {
@@ -1451,10 +1517,16 @@ api.put(
         approvedSendersResult.reason instanceof ApprovedSenderSyncError
           ? approvedSendersResult.reason.createdAddresses
           : [];
+      const rollbackSenderIdByEmail =
+        approvedSendersResult.reason instanceof ApprovedSenderSyncError
+          ? approvedSendersResult.reason.createdSenderIdByEmail
+          : new Map<string, string>();
 
       if (rollbackAddresses.length > 0) {
         try {
-          await removeApprovedSenders(c.env, rollbackAddresses);
+          await removeApprovedSenders(c.env, rollbackAddresses, {
+            senderIdByEmail: rollbackSenderIdByEmail,
+          });
         } catch (rollbackErr) {
           console.error(
             'Failed to rollback OCI approved senders after update sync error:',
@@ -1480,8 +1552,20 @@ api.put(
       return c.json({ error: 'Failed to update user' }, 500);
     }
 
-    const createdApprovedSenders = approvedSendersResult.value;
+    const {
+      createdAddresses: createdApprovedSenders,
+      senderIdByEmail: ensuredSenderIdByEmail,
+    } = approvedSendersResult.value;
     const nextPasswordHash = passwordHashResult.value;
+
+    const desiredSenderIdByEmail = new Map<string, string>();
+    for (const emailAddress of desiredEmails) {
+      const senderId =
+        ensuredSenderIdByEmail.get(emailAddress) ?? existingSenderIdByEmail.get(emailAddress);
+      if (senderId) {
+        desiredSenderIdByEmail.set(emailAddress, senderId);
+      }
+    }
 
     try {
       await c.env.DB.prepare('UPDATE users SET username = ? WHERE id = ?')
@@ -1489,7 +1573,9 @@ api.put(
         .run();
 
       await Promise.all([
-        replaceUserEmailAddresses(c.env, userId, desiredEmails),
+        replaceUserEmailAddresses(c.env, userId, desiredEmails, {
+          senderIdByEmail: desiredSenderIdByEmail,
+        }),
         setUserRole(c.env, userId, role),
       ]);
 
@@ -1503,7 +1589,17 @@ api.put(
 
       if (createdApprovedSenders.length > 0) {
         try {
-          await removeApprovedSenders(c.env, createdApprovedSenders);
+          const createdSenderIdByEmail = new Map<string, string>();
+          for (const emailAddress of createdApprovedSenders) {
+            const senderId = ensuredSenderIdByEmail.get(emailAddress);
+            if (senderId) {
+              createdSenderIdByEmail.set(emailAddress, senderId);
+            }
+          }
+
+          await removeApprovedSenders(c.env, createdApprovedSenders, {
+            senderIdByEmail: createdSenderIdByEmail,
+          });
         } catch (rollbackErr) {
           console.error('Failed to rollback OCI approved senders after user update error:', rollbackErr);
         }
@@ -1522,7 +1618,17 @@ api.put(
       }
 
       try {
-        await removeApprovedSenders(c.env, emailsToDelete);
+        const staleSenderIdByEmail = new Map<string, string>();
+        for (const emailAddress of emailsToDelete) {
+          const senderId = existingSenderIdByEmail.get(emailAddress);
+          if (senderId) {
+            staleSenderIdByEmail.set(emailAddress, senderId);
+          }
+        }
+
+        await removeApprovedSenders(c.env, emailsToDelete, {
+          senderIdByEmail: staleSenderIdByEmail,
+        });
         return null;
       } catch (err) {
         console.error('Failed to remove stale OCI approved senders during user update:', err);
@@ -1567,8 +1673,12 @@ api.delete('/admin/users/:id', async (c) => {
     }
   }
 
+  const existingSenderIdByEmail = await listUserSenderIdsByEmail(c.env, userId);
+
   try {
-    await removeApprovedSenders(c.env, existing.emails);
+    await removeApprovedSenders(c.env, existing.emails, {
+      senderIdByEmail: existingSenderIdByEmail,
+    });
   } catch (err) {
     console.error('Failed to remove OCI approved senders during user delete:', err);
     return c.json(

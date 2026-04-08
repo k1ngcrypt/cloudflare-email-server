@@ -56,41 +56,16 @@ const SCHEMA_STATEMENTS = [
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       address       TEXT NOT NULL UNIQUE,
+      oci_sender_id TEXT NOT NULL CHECK(length(trim(oci_sender_id)) > 0),
       is_primary    INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0, 1)),
       created_at    TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `,
   `
-    INSERT OR IGNORE INTO user_addresses (user_id, address, is_primary)
-    SELECT id, lower(trim(email)), 1
-    FROM users
-    WHERE email IS NOT NULL AND trim(email) <> ''
+    DROP TRIGGER IF EXISTS trg_users_insert_primary_address
   `,
   `
-    CREATE TRIGGER IF NOT EXISTS trg_users_insert_primary_address
-    AFTER INSERT ON users
-    WHEN NEW.email IS NOT NULL AND trim(NEW.email) <> ''
-    BEGIN
-      INSERT OR IGNORE INTO user_addresses (user_id, address, is_primary)
-      VALUES (NEW.id, lower(trim(NEW.email)), 1);
-
-      UPDATE user_addresses
-      SET is_primary = CASE WHEN address = lower(trim(NEW.email)) THEN 1 ELSE 0 END
-      WHERE user_id = NEW.id;
-    END
-  `,
-  `
-    CREATE TRIGGER IF NOT EXISTS trg_users_update_primary_address
-    AFTER UPDATE OF email ON users
-    WHEN NEW.email IS NOT NULL AND trim(NEW.email) <> ''
-    BEGIN
-      INSERT OR IGNORE INTO user_addresses (user_id, address, is_primary)
-      VALUES (NEW.id, lower(trim(NEW.email)), 1);
-
-      UPDATE user_addresses
-      SET is_primary = CASE WHEN address = lower(trim(NEW.email)) THEN 1 ELSE 0 END
-      WHERE user_id = NEW.id;
-    END
+    DROP TRIGGER IF EXISTS trg_users_update_primary_address
   `,
   `
     CREATE TABLE IF NOT EXISTS emails (
@@ -152,13 +127,6 @@ const SCHEMA_STATEMENTS = [
       updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `,
-  `
-    CREATE TABLE IF NOT EXISTS oci_approved_sender_cache (
-      email_address TEXT PRIMARY KEY,
-      sender_id     TEXT NOT NULL,
-      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `,
   'CREATE INDEX IF NOT EXISTS idx_emails_user_folder ON emails(user_id, folder)',
   'CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)',
@@ -166,16 +134,15 @@ const SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_sent_user_time ON sent_emails(user_id, sent_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_user_addresses_user ON user_addresses(user_id)',
   'CREATE INDEX IF NOT EXISTS idx_user_addresses_address ON user_addresses(address)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_user_addresses_sender_ocid ON user_addresses(oci_sender_id)',
   'CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role)',
   'DROP INDEX IF EXISTS idx_user_addresses_single_primary',
   'CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id)',
   'CREATE INDEX IF NOT EXISTS idx_attachments_sent ON attachments(sent_email_id)',
   'CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id)',
-  'CREATE INDEX IF NOT EXISTS idx_oci_sender_cache_updated_at ON oci_approved_sender_cache(updated_at)',
 ];
 
 const RESET_STATEMENTS = [
-  'DELETE FROM oci_approved_sender_cache',
   'DELETE FROM attachments',
   'DELETE FROM sent_emails',
   'DELETE FROM emails',
@@ -233,6 +200,17 @@ export async function seedUser(
     throw new Error('Failed to seed test user');
   }
 
+  const senderOcid = `ocid1.sender.oc1.test.${crypto.randomUUID().replace(/-/g, '')}`;
+  await getBindings()
+    .DB.prepare(
+      `
+        INSERT INTO user_addresses (user_id, address, oci_sender_id, is_primary)
+        VALUES (?, ?, ?, 1)
+      `
+    )
+    .bind(row.id, email.toLowerCase(), senderOcid)
+    .run();
+
   return {
     id: row.id,
     username,
@@ -244,11 +222,18 @@ export async function seedUser(
 export async function addUserEmailAddress(
   userId: number,
   address: string,
-  options: { isPrimary?: boolean } = {}
+  options: { isPrimary?: boolean; senderOcid?: string } = {}
 ): Promise<void> {
   const normalized = String(address || '').trim().toLowerCase();
   if (!normalized) {
     throw new Error('Email address is required');
+  }
+
+  const senderOcid = String(
+    options.senderOcid ?? `ocid1.sender.oc1.test.${crypto.randomUUID().replace(/-/g, '')}`
+  ).trim();
+  if (!senderOcid) {
+    throw new Error('senderOcid is required');
   }
 
   const isPrimary = options.isPrimary === true ? 1 : 0;
@@ -256,14 +241,15 @@ export async function addUserEmailAddress(
   await getBindings()
     .DB.prepare(
       `
-        INSERT INTO user_addresses (user_id, address, is_primary)
-        VALUES (?, ?, ?)
+        INSERT INTO user_addresses (user_id, address, oci_sender_id, is_primary)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(address) DO UPDATE SET
           user_id = excluded.user_id,
+          oci_sender_id = excluded.oci_sender_id,
           is_primary = excluded.is_primary
       `
     )
-    .bind(userId, normalized, isPrimary)
+    .bind(userId, normalized, senderOcid, isPrimary)
     .run();
 
   if (isPrimary === 1) {

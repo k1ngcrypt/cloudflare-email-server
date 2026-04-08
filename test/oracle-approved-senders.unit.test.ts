@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/index';
-import { removeApprovedSenders } from '../src/oracle-approved-senders';
+import { ensureApprovedSenders, removeApprovedSenders } from '../src/oracle-approved-senders';
 
 const TEST_PRIVATE_KEY = `-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDLoqe/sMOgzmH7
@@ -48,19 +48,6 @@ function makeEnv(): Env {
   };
 }
 
-function jsonResponse(
-  payload: unknown,
-  options: { status?: number; headers?: Record<string, string> } = {}
-): Response {
-  return new Response(JSON.stringify(payload), {
-    status: options.status ?? 200,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers ?? {}),
-    },
-  });
-}
-
 describe('removeApprovedSenders', () => {
   beforeEach(() => {
     fetchMock.mockReset();
@@ -71,139 +58,28 @@ describe('removeApprovedSenders', () => {
     vi.unstubAllGlobals();
   });
 
-  it('falls back to unfiltered pagination and deletes with lock override when filtered lookup misses', async () => {
+  it('deletes directly by provided sender OCID', async () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const requestUrl = new URL(
         typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
       );
       const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
 
-      if (method === 'GET' && requestUrl.pathname.endsWith('/senders')) {
-        const emailAddress = requestUrl.searchParams.get('emailAddress');
-        const page = requestUrl.searchParams.get('page');
-
-        if (emailAddress) {
-          return jsonResponse({ items: [] });
-        }
-
-        if (!page) {
-          return jsonResponse(
-            {
-              items: [
-                {
-                  id: 'ocid1.sender.oc1..someoneelse',
-                  emailAddress: 'someoneelse@example.test',
-                  lifecycleState: 'ACTIVE',
-                },
-              ],
-            },
-            {
-              headers: {
-                'opc-next-page': 'page-token-2',
-              },
-            }
-          );
-        }
-
-        if (page === 'page-token-2') {
-          return jsonResponse({
-            items: [
-              {
-                id: 'ocid1.sender.oc1..target',
-                emailAddress: 'alias@example.test',
-                lifecycleState: 'ACTIVE',
-              },
-            ],
-          });
-        }
-      }
-
-      if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
+      if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..direct')) {
         expect(requestUrl.searchParams.get('isLockOverride')).toBe('true');
-        const headers = new Headers(init?.headers);
-        expect(headers.get('if-match')).toBeNull();
         return new Response(null, { status: 204 });
       }
 
       return new Response('unexpected request', { status: 500 });
     });
 
-    await removeApprovedSenders(makeEnv(), ['Alias@example.test']);
-
-    const requestUrls = fetchMock.mock.calls.map((call) =>
-      new URL(String(call[0] instanceof Request ? call[0].url : call[0]))
+    await removeApprovedSenders(
+      makeEnv(),
+      ['Alias@example.test'],
+      {
+        senderIdByEmail: new Map([['alias@example.test', 'ocid1.sender.oc1..direct']]),
+      }
     );
-
-    expect(
-      requestUrls.some(
-        (url) =>
-          url.pathname.endsWith('/senders') &&
-          url.searchParams.get('emailAddress') === 'alias@example.test'
-      )
-    ).toBe(true);
-    expect(requestUrls.some((url) => url.searchParams.get('page') === 'page-token-2')).toBe(true);
-    expect(requestUrls.some((url) => url.pathname.endsWith('/senders/ocid1.sender.oc1..target'))).toBe(true);
-  });
-
-  it('reuses one unfiltered pagination scan for multiple unresolved emails', async () => {
-    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const requestUrl = new URL(
-        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-      );
-      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
-
-      if (method === 'GET' && requestUrl.pathname.endsWith('/senders')) {
-        const emailAddress = requestUrl.searchParams.get('emailAddress');
-        const page = requestUrl.searchParams.get('page');
-
-        if (emailAddress) {
-          return jsonResponse({ items: [] });
-        }
-
-        if (!page) {
-          return jsonResponse(
-            {
-              items: [
-                {
-                  id: 'ocid1.sender.oc1..first',
-                  emailAddress: 'first@example.test',
-                  lifecycleState: 'ACTIVE',
-                },
-              ],
-            },
-            {
-              headers: {
-                'opc-next-page': 'page-token-2',
-              },
-            }
-          );
-        }
-
-        if (page === 'page-token-2') {
-          return jsonResponse({
-            items: [
-              {
-                id: 'ocid1.sender.oc1..second',
-                emailAddress: 'second@example.test',
-                lifecycleState: 'ACTIVE',
-              },
-            ],
-          });
-        }
-      }
-
-      if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..first')) {
-        return new Response(null, { status: 204 });
-      }
-
-      if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..second')) {
-        return new Response(null, { status: 204 });
-      }
-
-      return new Response('unexpected request', { status: 500 });
-    });
-
-    await removeApprovedSenders(makeEnv(), ['first@example.test', 'second@example.test']);
 
     const requests = fetchMock.mock.calls.map((call) => {
       const input = call[0] as RequestInfo | URL;
@@ -215,25 +91,19 @@ describe('removeApprovedSenders', () => {
       return { requestUrl, method };
     });
 
-    const filteredListRequests = requests.filter(
-      (entry) => entry.method === 'GET' &&
-        entry.requestUrl.pathname.endsWith('/senders') &&
-        Boolean(entry.requestUrl.searchParams.get('emailAddress'))
-    );
-    expect(filteredListRequests).toHaveLength(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].method).toBe('DELETE');
+    expect(requests[0].requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..direct')).toBe(true);
+  });
 
-    const unfilteredListRequests = requests.filter(
-      (entry) => entry.method === 'GET' &&
-        entry.requestUrl.pathname.endsWith('/senders') &&
-        !entry.requestUrl.searchParams.get('emailAddress')
-    );
-    expect(unfilteredListRequests).toHaveLength(2);
-    expect(unfilteredListRequests.some((entry) => entry.requestUrl.searchParams.get('page') === 'page-token-2')).toBe(true);
+  it('fails when sender OCID is missing for a requested address', async () => {
+    await expect(
+      removeApprovedSenders(makeEnv(), ['alias@example.test'], {
+        senderIdByEmail: new Map(),
+      })
+    ).rejects.toThrow('Missing OCI sender OCID in DB');
 
-    const deleteRequests = requests.filter(
-      (entry) => entry.method === 'DELETE' && entry.requestUrl.pathname.includes('/senders/ocid1.sender.oc1..')
-    );
-    expect(deleteRequests).toHaveLength(2);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('retries delete with if-match when OCI requires a precondition', async () => {
@@ -244,18 +114,6 @@ describe('removeApprovedSenders', () => {
         typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
       );
       const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
-
-      if (method === 'GET' && requestUrl.pathname.endsWith('/senders')) {
-        return jsonResponse({
-          items: [
-            {
-              id: 'ocid1.sender.oc1..target',
-              emailAddress: 'alias@example.test',
-              lifecycleState: 'ACTIVE',
-            },
-          ],
-        });
-      }
 
       if (method === 'DELETE' && requestUrl.pathname.endsWith('/senders/ocid1.sender.oc1..target')) {
         deleteAttempts += 1;
@@ -282,7 +140,9 @@ describe('removeApprovedSenders', () => {
       return new Response('unexpected request', { status: 500 });
     });
 
-    await removeApprovedSenders(makeEnv(), ['Alias@example.test']);
+    await removeApprovedSenders(makeEnv(), ['Alias@example.test'], {
+      senderIdByEmail: new Map([['alias@example.test', 'ocid1.sender.oc1..target']]),
+    });
 
     expect(deleteAttempts).toBe(2);
 
@@ -297,5 +157,73 @@ describe('removeApprovedSenders', () => {
     }).length;
 
     expect(detailLookupCount).toBe(1);
+  });
+});
+
+describe('ensureApprovedSenders', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('stores sender OCID from create response body id', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestUrl = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      );
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+
+      if (method === 'POST' && requestUrl.pathname.endsWith('/senders')) {
+        return new Response(
+          JSON.stringify({
+            id: 'ocid1.sender.oc1.iad.aaaaaaaaexample',
+            compartmentId: 'ocid1.compartment.oc1..aaaa',
+            emailAddress: 'alias@example.test',
+            lifecycleState: 'ACTIVE',
+          }),
+          {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+      }
+
+      return new Response('unexpected request', { status: 500 });
+    });
+
+    const result = await ensureApprovedSenders(makeEnv(), ['Alias@example.test']);
+
+    expect(result.createdAddresses).toEqual(['alias@example.test']);
+    expect(result.senderIdByEmail.get('alias@example.test')).toBe('ocid1.sender.oc1.iad.aaaaaaaaexample');
+  });
+
+  it('fails if create response omits sender id', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestUrl = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      );
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+
+      if (method === 'POST' && requestUrl.pathname.endsWith('/senders')) {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+      }
+
+      return new Response('unexpected request', { status: 500 });
+    });
+
+    await expect(ensureApprovedSenders(makeEnv(), ['Alias@example.test'])).rejects.toThrow(
+      'did not include an id'
+    );
   });
 });

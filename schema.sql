@@ -31,60 +31,20 @@ WHERE user_id = (
 )
 AND (SELECT COUNT(*) FROM user_roles WHERE role = 'admin') = 0;
 
--- New users get a default role. First account becomes admin automatically.
-CREATE TRIGGER IF NOT EXISTS trg_users_insert_default_role
-AFTER INSERT ON users
-WHEN NOT EXISTS (SELECT 1 FROM user_roles WHERE user_id = NEW.id)
-BEGIN
-  INSERT INTO user_roles (user_id, role)
-  VALUES (
-    NEW.id,
-    CASE
-      WHEN (SELECT COUNT(*) FROM user_roles WHERE role = 'admin') = 0 THEN 'admin'
-      ELSE 'user'
-    END
-  );
-END;
 
 -- User address aliases: one user can own multiple inbound/outbound email addresses.
 CREATE TABLE IF NOT EXISTS user_addresses (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   address       TEXT NOT NULL UNIQUE,
+  oci_sender_id TEXT NOT NULL CHECK(length(trim(oci_sender_id)) > 0),
   is_primary    INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0, 1)),
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Backfill existing users into user_addresses when migrating older deployments.
-INSERT OR IGNORE INTO user_addresses (user_id, address, is_primary)
-SELECT id, lower(trim(email)), 1
-FROM users
-WHERE email IS NOT NULL AND trim(email) <> '';
-
--- Keep user_addresses in sync with users.email for direct SQL inserts/updates.
-CREATE TRIGGER IF NOT EXISTS trg_users_insert_primary_address
-AFTER INSERT ON users
-WHEN NEW.email IS NOT NULL AND trim(NEW.email) <> ''
-BEGIN
-  INSERT OR IGNORE INTO user_addresses (user_id, address, is_primary)
-  VALUES (NEW.id, lower(trim(NEW.email)), 1);
-
-  UPDATE user_addresses
-  SET is_primary = CASE WHEN address = lower(trim(NEW.email)) THEN 1 ELSE 0 END
-  WHERE user_id = NEW.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_users_update_primary_address
-AFTER UPDATE OF email ON users
-WHEN NEW.email IS NOT NULL AND trim(NEW.email) <> ''
-BEGIN
-  INSERT OR IGNORE INTO user_addresses (user_id, address, is_primary)
-  VALUES (NEW.id, lower(trim(NEW.email)), 1);
-
-  UPDATE user_addresses
-  SET is_primary = CASE WHEN address = lower(trim(NEW.email)) THEN 1 ELSE 0 END
-  WHERE user_id = NEW.id;
-END;
+-- Address rows must include OCI sender OCIDs from control-plane create responses.
+DROP TRIGGER IF EXISTS trg_users_insert_primary_address;
+DROP TRIGGER IF EXISTS trg_users_update_primary_address;
 
 -- Emails table: one row per received message
 CREATE TABLE IF NOT EXISTS emails (
@@ -146,13 +106,6 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- OCI approved sender cache to avoid repeated control-plane list scans.
-CREATE TABLE IF NOT EXISTS oci_approved_sender_cache (
-  email_address TEXT PRIMARY KEY,
-  sender_id     TEXT NOT NULL,
-  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_emails_user_folder ON emails(user_id, folder);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at DESC);
@@ -161,9 +114,9 @@ CREATE INDEX IF NOT EXISTS idx_login_attempts_blocked ON login_attempts(blocked_
 CREATE INDEX IF NOT EXISTS idx_sent_user_time ON sent_emails(user_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_user ON user_addresses(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_address ON user_addresses(address);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_addresses_sender_ocid ON user_addresses(oci_sender_id);
 CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role);
 DROP INDEX IF EXISTS idx_user_addresses_single_primary;
 CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_sent ON attachments(sent_email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
-CREATE INDEX IF NOT EXISTS idx_oci_sender_cache_updated_at ON oci_approved_sender_cache(updated_at);

@@ -2,9 +2,6 @@ import type { Env } from './index';
 
 const OCI_CONTROL_API_VERSION_PATH = '/20170907';
 const JSON_CONTENT_TYPE = 'application/json';
-const LIST_SENDERS_PAGE_SIZE = 100;
-const LIST_SENDERS_MAX_PAGES = 50;
-const OCI_SENDER_CACHE_TABLE = 'oci_approved_sender_cache';
 
 const SIGNED_HEADERS_NO_BODY = ['(request-target)', 'host', 'x-date'] as const;
 const SIGNED_HEADERS_WITH_BODY = [
@@ -19,35 +16,30 @@ const SIGNED_HEADERS_WITH_BODY = [
 interface SenderSummary {
   id: string;
   emailAddress: string;
-  lifecycleState?: string;
 }
 
-interface ListSendersResponseBody {
-  items?: SenderSummary[];
+export interface EnsureApprovedSendersResult {
+  createdAddresses: string[];
+  senderIdByEmail: Map<string, string>;
 }
 
-interface ListSendersPageOptions {
-  emailAddress?: string;
-  page?: string;
-}
-
-interface ListSendersPageResult {
-  items: SenderSummary[];
-  nextPage: string | null;
-}
-
-interface SenderCacheRow {
-  email_address: string;
-  sender_id: string;
+interface RemoveApprovedSendersOptions {
+  senderIdByEmail?: ReadonlyMap<string, string | null | undefined>;
 }
 
 export class ApprovedSenderSyncError extends Error {
   readonly createdAddresses: string[];
+  readonly createdSenderIdByEmail: ReadonlyMap<string, string>;
 
-  constructor(message: string, createdAddresses: string[]) {
+  constructor(
+    message: string,
+    createdAddresses: string[],
+    createdSenderIdByEmail: ReadonlyMap<string, string> = new Map<string, string>()
+  ) {
     super(message);
     this.name = 'ApprovedSenderSyncError';
     this.createdAddresses = createdAddresses;
+    this.createdSenderIdByEmail = createdSenderIdByEmail;
   }
 }
 
@@ -58,9 +50,6 @@ let cachedNormalizedPrivateKeyRaw: string | null = null;
 let cachedNormalizedPrivateKey: string | null = null;
 let cachedKeyIdParts: string | null = null;
 let cachedKeyId: string | null = null;
-let senderCacheReadyPromise: Promise<void> | null = null;
-let senderCacheReadyDb: D1Database | null = null;
-let senderCacheDisabled = false;
 
 function normalizeEmailAddress(address: string): string {
   return address.trim().toLowerCase();
@@ -81,177 +70,6 @@ function normalizeUniqueEmailAddresses(emailAddresses: string[]): string[] {
   }
 
   return uniqueAddresses;
-}
-
-function buildSqlPlaceholders(count: number): string {
-  return Array.from({ length: count }, () => '?').join(', ');
-}
-
-function canUseSenderCache(env: Env): boolean {
-  const candidate = env.DB as unknown as { prepare?: unknown };
-  return !senderCacheDisabled && typeof candidate.prepare === 'function';
-}
-
-async function ensureSenderCacheTable(env: Env): Promise<void> {
-  if (!canUseSenderCache(env)) {
-    return;
-  }
-
-  if (senderCacheReadyPromise && senderCacheReadyDb === env.DB) {
-    await senderCacheReadyPromise;
-    return;
-  }
-
-  senderCacheReadyDb = env.DB;
-  senderCacheReadyPromise = (async () => {
-    await env.DB.prepare(
-      `
-        CREATE TABLE IF NOT EXISTS ${OCI_SENDER_CACHE_TABLE} (
-          email_address TEXT PRIMARY KEY,
-          sender_id TEXT NOT NULL,
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-      `
-    ).run();
-
-    await env.DB.prepare(
-      `
-        CREATE INDEX IF NOT EXISTS idx_oci_sender_cache_updated_at
-        ON ${OCI_SENDER_CACHE_TABLE}(updated_at)
-      `
-    ).run();
-  })().catch((err) => {
-    senderCacheDisabled = true;
-    senderCacheReadyPromise = null;
-    console.error('Failed to initialize OCI sender cache table:', err);
-  });
-
-  await senderCacheReadyPromise;
-}
-
-async function getCachedSenderMap(
-  env: Env,
-  normalizedEmailAddresses: string[]
-): Promise<Map<string, SenderSummary>> {
-  const senderByEmail = new Map<string, SenderSummary>();
-  if (normalizedEmailAddresses.length === 0) {
-    return senderByEmail;
-  }
-
-  await ensureSenderCacheTable(env);
-  if (!canUseSenderCache(env)) {
-    return senderByEmail;
-  }
-
-  try {
-    const placeholders = buildSqlPlaceholders(normalizedEmailAddresses.length);
-    const rows = await env.DB.prepare(
-      `
-        SELECT email_address, sender_id
-        FROM ${OCI_SENDER_CACHE_TABLE}
-        WHERE email_address IN (${placeholders})
-      `
-    )
-      .bind(...normalizedEmailAddresses)
-      .all<SenderCacheRow>();
-
-    for (const row of rows.results ?? []) {
-      const emailAddress = normalizeEmailAddress(String(row.email_address ?? ''));
-      const senderId = String(row.sender_id ?? '').trim();
-      if (!emailAddress || !senderId) {
-        continue;
-      }
-
-      senderByEmail.set(emailAddress, {
-        id: senderId,
-        emailAddress,
-      });
-    }
-  } catch (err) {
-    senderCacheDisabled = true;
-    console.error('Failed to read OCI sender cache entries:', err);
-  }
-
-  return senderByEmail;
-}
-
-async function upsertSenderCacheEntries(
-  env: Env,
-  entries: Array<{ emailAddress: string; senderId: string }>
-): Promise<void> {
-  if (entries.length === 0) {
-    return;
-  }
-
-  await ensureSenderCacheTable(env);
-  if (!canUseSenderCache(env)) {
-    return;
-  }
-
-  const senderIdByEmail = new Map<string, string>();
-  for (const entry of entries) {
-    const emailAddress = normalizeEmailAddress(entry.emailAddress);
-    const senderId = String(entry.senderId ?? '').trim();
-    if (!emailAddress || !senderId) {
-      continue;
-    }
-
-    senderIdByEmail.set(emailAddress, senderId);
-  }
-
-  if (senderIdByEmail.size === 0) {
-    return;
-  }
-
-  try {
-    await env.DB.batch(
-      Array.from(senderIdByEmail.entries()).map(([emailAddress, senderId]) =>
-        env.DB.prepare(
-          `
-            INSERT INTO ${OCI_SENDER_CACHE_TABLE} (email_address, sender_id, updated_at)
-            VALUES (?, ?, datetime('now'))
-            ON CONFLICT(email_address) DO UPDATE SET
-              sender_id = excluded.sender_id,
-              updated_at = excluded.updated_at
-          `
-        ).bind(emailAddress, senderId)
-      )
-    );
-  } catch (err) {
-    senderCacheDisabled = true;
-    console.error('Failed to upsert OCI sender cache entries:', err);
-  }
-}
-
-async function deleteSenderCacheEntries(env: Env, normalizedEmailAddresses: string[]): Promise<void> {
-  if (normalizedEmailAddresses.length === 0) {
-    return;
-  }
-
-  await ensureSenderCacheTable(env);
-  if (!canUseSenderCache(env)) {
-    return;
-  }
-
-  const uniqueEmailAddresses = normalizeUniqueEmailAddresses(normalizedEmailAddresses);
-  if (uniqueEmailAddresses.length === 0) {
-    return;
-  }
-
-  try {
-    const placeholders = buildSqlPlaceholders(uniqueEmailAddresses.length);
-    await env.DB.prepare(
-      `
-        DELETE FROM ${OCI_SENDER_CACHE_TABLE}
-        WHERE email_address IN (${placeholders})
-      `
-    )
-      .bind(...uniqueEmailAddresses)
-      .run();
-  } catch (err) {
-    senderCacheDisabled = true;
-    console.error('Failed to delete OCI sender cache entries:', err);
-  }
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -508,121 +326,6 @@ async function readOciError(response: Response): Promise<string> {
   return trimmed;
 }
 
-function isSenderDeleted(lifecycleState: string | undefined): boolean {
-  const lifecycle = String(lifecycleState ?? '').toUpperCase();
-  return lifecycle === 'DELETED' || lifecycle === 'DELETING';
-}
-
-async function listSendersPage(
-  env: Env,
-  options: ListSendersPageOptions
-): Promise<ListSendersPageResult> {
-  const response = await requestOciEmailControlPlane(env, {
-    method: 'GET',
-    path: '/senders',
-    query: {
-      compartmentId: env.OCI_EMAIL_COMPARTMENT_OCID,
-      emailAddress: options.emailAddress,
-      page: options.page,
-      limit: LIST_SENDERS_PAGE_SIZE,
-    },
-  });
-
-  if (!response.ok) {
-    const requestId = response.headers.get('opc-request-id');
-    const detail = await readOciError(response);
-    console.error('OCI approved sender list failed', {
-      emailFilter: options.emailAddress ?? null,
-      page: options.page ?? null,
-      status: response.status,
-      requestId,
-      detail,
-    });
-    throw new Error(`Failed to list approved senders (${response.status}): ${detail}`);
-  }
-
-  const payload = (await response.json().catch(() => ({}))) as ListSendersResponseBody;
-  const items = Array.isArray(payload.items) ? payload.items : [];
-  const nextPage = response.headers.get('opc-next-page');
-
-  return {
-    items,
-    nextPage: nextPage && nextPage.trim().length > 0 ? nextPage : null,
-  };
-}
-
-async function findApprovedSenderInPages(
-  env: Env,
-  normalizedEmailAddress: string,
-  options: { emailFilter?: string }
-): Promise<SenderSummary | null> {
-  const seenPages = new Set<string>();
-  let page: string | undefined;
-
-  for (let pageCount = 0; pageCount < LIST_SENDERS_MAX_PAGES; pageCount += 1) {
-    const pageResult = await listSendersPage(env, {
-      emailAddress: options.emailFilter,
-      page,
-    });
-
-    for (const item of pageResult.items) {
-      const itemEmail = normalizeEmailAddress(String(item.emailAddress ?? ''));
-      if (itemEmail !== normalizedEmailAddress || isSenderDeleted(item.lifecycleState)) {
-        continue;
-      }
-
-      return item;
-    }
-
-    if (!pageResult.nextPage || seenPages.has(pageResult.nextPage)) {
-      break;
-    }
-
-    seenPages.add(pageResult.nextPage);
-    page = pageResult.nextPage;
-  }
-
-  return null;
-}
-
-async function findApprovedSendersInUnfilteredPages(
-  env: Env,
-  normalizedEmailAddresses: string[]
-): Promise<Map<string, SenderSummary>> {
-  const remaining = new Set(normalizedEmailAddresses);
-  const senderByEmail = new Map<string, SenderSummary>();
-
-  if (remaining.size === 0) {
-    return senderByEmail;
-  }
-
-  const seenPages = new Set<string>();
-  let page: string | undefined;
-
-  for (let pageCount = 0; pageCount < LIST_SENDERS_MAX_PAGES && remaining.size > 0; pageCount += 1) {
-    const pageResult = await listSendersPage(env, { page });
-
-    for (const item of pageResult.items) {
-      const itemEmail = normalizeEmailAddress(String(item.emailAddress ?? ''));
-      if (!remaining.has(itemEmail) || isSenderDeleted(item.lifecycleState)) {
-        continue;
-      }
-
-      senderByEmail.set(itemEmail, item);
-      remaining.delete(itemEmail);
-    }
-
-    if (!pageResult.nextPage || seenPages.has(pageResult.nextPage)) {
-      break;
-    }
-
-    seenPages.add(pageResult.nextPage);
-    page = pageResult.nextPage;
-  }
-
-  return senderByEmail;
-}
-
 async function getApprovedSenderEtag(env: Env, senderId: string): Promise<string | null> {
   const response = await requestOciEmailControlPlane(env, {
     method: 'GET',
@@ -665,10 +368,10 @@ async function deleteApprovedSender(env: Env, senderId: string, etag?: string): 
 async function ensureApprovedSender(
   env: Env,
   emailAddress: string
-): Promise<{ created: boolean; senderId: string | null }> {
+): Promise<{ emailAddress: string; senderId: string }> {
   const normalized = normalizeEmailAddress(emailAddress);
   if (!normalized) {
-    return { created: false, senderId: null };
+    throw new Error('Email address is required for OCI approved sender creation');
   }
 
   const createResponse = await requestOciEmailControlPlane(env, {
@@ -680,22 +383,27 @@ async function ensureApprovedSender(
     },
   });
 
-  if (createResponse.ok) {
-    const payload = (await createResponse.json().catch(() => ({}))) as { id?: string };
-    const senderId = typeof payload.id === 'string' && payload.id.trim().length > 0 ? payload.id.trim() : null;
+  if (!createResponse.ok) {
+    const detail = await readOciError(createResponse);
+    if (createResponse.status === 409) {
+      throw new Error(
+        `Approved sender already exists for ${normalized} but OCI did not return an OCID. Remove the stale sender and retry.`
+      );
+    }
 
-    return {
-      created: true,
-      senderId,
-    };
+    throw new Error(`Failed to create approved sender for ${normalized} (${createResponse.status}): ${detail}`);
   }
 
-  if (createResponse.status === 409) {
-    return { created: false, senderId: null };
+  const payload = (await createResponse.json().catch(() => ({}))) as { id?: string };
+  const senderId = typeof payload.id === 'string' ? payload.id.trim() : '';
+  if (!senderId) {
+    throw new Error(`OCI create sender response for ${normalized} did not include an id (OCID)`);
   }
 
-  const detail = await readOciError(createResponse);
-  throw new Error(`Failed to create approved sender for ${normalized} (${createResponse.status}): ${detail}`);
+  return {
+    emailAddress: normalized,
+    senderId,
+  };
 }
 
 async function removeApprovedSenderById(
@@ -731,31 +439,21 @@ async function removeApprovedSenderById(
   );
 }
 
-export async function ensureApprovedSenders(env: Env, emailAddresses: string[]): Promise<string[]> {
+export async function ensureApprovedSenders(
+  env: Env,
+  emailAddresses: string[]
+): Promise<EnsureApprovedSendersResult> {
   const uniqueEmailAddresses = normalizeUniqueEmailAddresses(emailAddresses);
-  const settled = await Promise.allSettled(
-    uniqueEmailAddresses.map(async (emailAddress) => ({
-      emailAddress,
-      ...(await ensureApprovedSender(env, emailAddress)),
-    }))
-  );
+  const settled = await Promise.allSettled(uniqueEmailAddresses.map((emailAddress) => ensureApprovedSender(env, emailAddress)));
 
   const createdAddresses: string[] = [];
-  const cacheEntries: Array<{ emailAddress: string; senderId: string }> = [];
+  const senderIdByEmail = new Map<string, string>();
   let firstError: unknown = null;
 
   for (const result of settled) {
     if (result.status === 'fulfilled') {
-      if (result.value.created) {
-        createdAddresses.push(result.value.emailAddress);
-      }
-
-      if (result.value.senderId) {
-        cacheEntries.push({
-          emailAddress: result.value.emailAddress,
-          senderId: result.value.senderId,
-        });
-      }
+      createdAddresses.push(result.value.emailAddress);
+      senderIdByEmail.set(result.value.emailAddress, result.value.senderId);
 
       continue;
     }
@@ -767,100 +465,53 @@ export async function ensureApprovedSenders(env: Env, emailAddresses: string[]):
 
   if (firstError !== null) {
     const message = firstError instanceof Error ? firstError.message : 'Failed to ensure approved senders';
-    throw new ApprovedSenderSyncError(message, createdAddresses);
+    throw new ApprovedSenderSyncError(message, createdAddresses, senderIdByEmail);
   }
 
-  await upsertSenderCacheEntries(env, cacheEntries);
-
-  return createdAddresses;
+  return {
+    createdAddresses,
+    senderIdByEmail,
+  };
 }
 
-export async function removeApprovedSenders(env: Env, emailAddresses: string[]): Promise<void> {
+export async function removeApprovedSenders(
+  env: Env,
+  emailAddresses: string[],
+  options: RemoveApprovedSendersOptions = {}
+): Promise<void> {
   const uniqueEmailAddresses = normalizeUniqueEmailAddresses(emailAddresses);
   if (uniqueEmailAddresses.length === 0) {
     return;
   }
 
-  const senderByEmail = await getCachedSenderMap(env, uniqueEmailAddresses);
-  const discoveredSenderEntries: Array<{ emailAddress: string; senderId: string }> = [];
-  let unresolvedEmailAddresses = uniqueEmailAddresses.filter((emailAddress) => !senderByEmail.has(emailAddress));
-
-  if (unresolvedEmailAddresses.length > 1) {
-    const unfilteredSenderByEmail = await findApprovedSendersInUnfilteredPages(env, unresolvedEmailAddresses);
-    unresolvedEmailAddresses = [];
-
-    for (const emailAddress of uniqueEmailAddresses) {
-      if (senderByEmail.has(emailAddress)) {
+  const senderByEmail = new Map<string, SenderSummary>();
+  if (options.senderIdByEmail) {
+    for (const [rawEmailAddress, rawSenderId] of options.senderIdByEmail.entries()) {
+      const emailAddress = normalizeEmailAddress(rawEmailAddress);
+      const senderId = String(rawSenderId ?? '').trim();
+      if (!emailAddress || !senderId) {
         continue;
       }
 
-      const sender = unfilteredSenderByEmail.get(emailAddress);
-      if (sender) {
-        senderByEmail.set(emailAddress, sender);
-        discoveredSenderEntries.push({ emailAddress, senderId: sender.id });
-        continue;
-      }
-
-      unresolvedEmailAddresses.push(emailAddress);
+      senderByEmail.set(emailAddress, {
+        id: senderId,
+        emailAddress,
+      });
     }
   }
 
-  if (unresolvedEmailAddresses.length > 0) {
-    const filteredLookupResults = await Promise.all(
-      unresolvedEmailAddresses.map(async (emailAddress) => {
-        const sender = await findApprovedSenderInPages(env, emailAddress, {
-          emailFilter: emailAddress,
-        });
-
-        return { emailAddress, sender };
-      })
-    );
-
-    for (const result of filteredLookupResults) {
-      if (result.sender) {
-        senderByEmail.set(result.emailAddress, result.sender);
-        discoveredSenderEntries.push({
-          emailAddress: result.emailAddress,
-          senderId: result.sender.id,
-        });
-      }
-    }
-  }
-
-  const unresolvedAfterFiltered = uniqueEmailAddresses.filter(
+  const missingSenderIdEmails = uniqueEmailAddresses.filter(
     (emailAddress) => !senderByEmail.has(emailAddress)
   );
 
-  if (unresolvedAfterFiltered.length > 0) {
-    // Some OCI tenancies can return incomplete filtered results; do one final
-    // unfiltered scan for unresolved addresses before treating them as absent.
-    const fallbackSenderByEmail = await findApprovedSendersInUnfilteredPages(env, unresolvedAfterFiltered);
-
-    for (const emailAddress of unresolvedAfterFiltered) {
-      const fallbackSender = fallbackSenderByEmail.get(emailAddress);
-      if (fallbackSender) {
-        senderByEmail.set(emailAddress, fallbackSender);
-        discoveredSenderEntries.push({
-          emailAddress,
-          senderId: fallbackSender.id,
-        });
-      }
-    }
-  }
-
-  await upsertSenderCacheEntries(env, discoveredSenderEntries);
-
-  const emailAddressesWithSender = uniqueEmailAddresses.filter((emailAddress) =>
-    senderByEmail.has(emailAddress)
-  );
-
-  if (emailAddressesWithSender.length === 0) {
-    await deleteSenderCacheEntries(env, uniqueEmailAddresses);
-    return;
+  if (missingSenderIdEmails.length > 0) {
+    throw new Error(
+      `Missing OCI sender OCID in DB for: ${missingSenderIdEmails.join(', ')}`
+    );
   }
 
   const settled = await Promise.allSettled(
-    emailAddressesWithSender.map(async (emailAddress) => {
+    uniqueEmailAddresses.map(async (emailAddress) => {
       await removeApprovedSenderById(env, emailAddress, senderByEmail.get(emailAddress) as SenderSummary);
       return emailAddress;
     })
@@ -879,8 +530,6 @@ export async function removeApprovedSenders(env: Env, emailAddresses: string[]):
       firstError = result.reason;
     }
   }
-
-  await deleteSenderCacheEntries(env, removedEmailAddresses);
 
   if (firstError !== null) {
     throw firstError instanceof Error
