@@ -9,6 +9,7 @@ export interface SendAttachment {
 
 interface SendOptions {
   from: string;
+  fromName: string;
   to: string;
   subject: string;
   text: string;
@@ -76,7 +77,7 @@ function parseRecipientList(rawRecipients: string): string[] {
 
 function buildRawMessage(opts: SendOptions, recipients: string[]): string {
   const mimeMessage = createMimeMessage();
-  mimeMessage.setSender({ addr: opts.from, name: 'Webmail' });
+  mimeMessage.setSender({ addr: opts.from, name: opts.fromName });
   mimeMessage.setTo(recipients.map((email) => ({ addr: email })));
   mimeMessage.setSubject(opts.subject);
 

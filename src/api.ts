@@ -31,8 +31,9 @@ import {
 import { sendEmail, type SendAttachment } from './send';
 import {
   isValidEmailAddress,
-  listUserEmailAddresses,
+  listUserEmailIdentities,
   normalizeEmailAddress,
+  type UserEmailIdentity,
 } from './user-addresses';
 import {
   ApprovedSenderSyncError,
@@ -99,13 +100,19 @@ const sendAttachmentSchema = z.object({
   mimeType: z.string().optional(),
 });
 
+const adminAliasIdentitySchema = z.object({
+  address: z.string().trim().min(3),
+  name: z.string().trim().min(1).max(160),
+});
+
 const adminRoleSchema = z.enum(['admin', 'user']);
 const adminUserCreateSchema = z.object({
   username: z.string().trim().min(1).max(120),
   password: z.string().min(8),
   role: adminRoleSchema,
   primaryEmail: z.string().trim().min(3),
-  emails: z.array(z.string()).optional().default([]),
+  primaryName: z.string().trim().min(1).max(160),
+  aliases: z.array(adminAliasIdentitySchema).optional().default([]),
 });
 
 const adminUserUpdateSchema = z.object({
@@ -113,7 +120,8 @@ const adminUserUpdateSchema = z.object({
   password: z.string().min(8).optional(),
   role: adminRoleSchema.optional(),
   primaryEmail: z.string().trim().min(3).optional(),
-  emails: z.array(z.string()).optional(),
+  primaryName: z.string().trim().min(1).max(160).optional(),
+  aliases: z.array(adminAliasIdentitySchema).optional(),
 });
 
 const selfPasswordUpdateSchema = z.object({
@@ -203,17 +211,31 @@ async function failedLoginResponse(c: Context<AppBindings>, throttleKey: string)
 async function resolveUserAddressSet(
   env: Env,
   userId: number
-): Promise<{ primaryEmail: string; emails: string[] }> {
-  const emails = await listUserEmailAddresses(env, userId);
-
-  const primaryEmail = emails[0] ?? '';
-  if (!primaryEmail) {
+): Promise<{
+  primaryEmail: string;
+  primaryName: string;
+  emails: string[];
+  emailIdentities: UserEmailIdentity[];
+  nameByEmail: Map<string, string>;
+}> {
+  const emailIdentities = await listUserEmailIdentities(env, userId);
+  const primaryIdentity = emailIdentities[0];
+  if (!primaryIdentity) {
     throw new Error(`User ${userId} has no email addresses configured`);
   }
 
+  const emails = emailIdentities.map((identity) => identity.address);
+  const nameByEmail = new Map<string, string>();
+  for (const identity of emailIdentities) {
+    nameByEmail.set(identity.address, identity.name);
+  }
+
   return {
-    primaryEmail,
+    primaryEmail: primaryIdentity.address,
+    primaryName: primaryIdentity.name,
     emails,
+    emailIdentities,
+    nameByEmail,
   };
 }
 
@@ -235,7 +257,14 @@ interface UserAddressOwnerRow {
 interface UserAddressByUserRow {
   user_id: number;
   address: string;
+  display_name: string;
+  is_primary: number;
 }
+
+type ManagedEmailIdentity = {
+  address: string;
+  name: string;
+};
 
 interface UserAddressSenderIdRow {
   address: string;
@@ -251,32 +280,54 @@ function normalizeRole(role: string | null | undefined): UserRole {
   return role === 'admin' ? 'admin' : 'user';
 }
 
-function normalizeManagedEmails(primaryEmail: string, aliasEmails: string[]): string[] {
+function normalizeManagedIdentities(
+  primaryEmail: string,
+  primaryName: string,
+  aliasIdentities: Array<{ address: string; name: string }>
+): ManagedEmailIdentity[] {
   const normalizedPrimary = normalizeEmailAddress(primaryEmail);
   if (!isValidEmailAddress(normalizedPrimary)) {
     throw new Error('primaryEmail must be a valid email address');
   }
 
-  const normalizedEmails = [normalizedPrimary];
+  const normalizedPrimaryName = primaryName.trim();
+  if (!normalizedPrimaryName) {
+    throw new Error('primaryName is required');
+  }
+
+  const normalizedIdentities: ManagedEmailIdentity[] = [
+    {
+      address: normalizedPrimary,
+      name: normalizedPrimaryName,
+    },
+  ];
   const seen = new Set<string>([normalizedPrimary]);
 
-  for (const candidate of aliasEmails) {
-    const normalized = normalizeEmailAddress(String(candidate ?? ''));
+  for (const candidate of aliasIdentities) {
+    const normalized = normalizeEmailAddress(String(candidate?.address ?? ''));
     if (!normalized) {
       continue;
     }
 
     if (!isValidEmailAddress(normalized)) {
-      throw new Error(`Invalid email address: ${candidate}`);
+      throw new Error(`Invalid email address: ${String(candidate?.address ?? '')}`);
+    }
+
+    const normalizedAliasName = String(candidate?.name ?? '').trim();
+    if (!normalizedAliasName) {
+      throw new Error(`Display name is required for ${normalized}`);
     }
 
     if (!seen.has(normalized)) {
       seen.add(normalized);
-      normalizedEmails.push(normalized);
+      normalizedIdentities.push({
+        address: normalized,
+        name: normalizedAliasName,
+      });
     }
   }
 
-  return normalizedEmails;
+  return normalizedIdentities;
 }
 
 function isUniqueConstraintError(err: unknown): boolean {
@@ -295,9 +346,29 @@ function buildSqlPlaceholders(count: number): string {
 async function resolveUserAddressSets(
   env: Env,
   userIds: number[]
-): Promise<Map<number, { primaryEmail: string; emails: string[] }>> {
+): Promise<
+  Map<
+    number,
+    {
+      primaryEmail: string;
+      primaryName: string;
+      emails: string[];
+      emailIdentities: UserEmailIdentity[];
+      nameByEmail: Map<string, string>;
+    }
+  >
+> {
   const uniqueUserIds = Array.from(new Set(userIds.filter((userId) => Number.isSafeInteger(userId) && userId > 0)));
-  const addressSets = new Map<number, { primaryEmail: string; emails: string[] }>();
+  const addressSets = new Map<
+    number,
+    {
+      primaryEmail: string;
+      primaryName: string;
+      emails: string[];
+      emailIdentities: UserEmailIdentity[];
+      nameByEmail: Map<string, string>;
+    }
+  >();
 
   if (uniqueUserIds.length === 0) {
     return addressSets;
@@ -306,7 +377,7 @@ async function resolveUserAddressSets(
   const placeholders = buildSqlPlaceholders(uniqueUserIds.length);
   const rows = await env.DB.prepare(
     `
-      SELECT user_id, address
+      SELECT user_id, address, display_name, is_primary
       FROM user_addresses
       WHERE user_id IN (${placeholders})
       ORDER BY user_id ASC, is_primary DESC, id ASC
@@ -315,7 +386,7 @@ async function resolveUserAddressSets(
     .bind(...uniqueUserIds)
     .all<UserAddressByUserRow>();
 
-  const emailsByUser = new Map<number, string[]>();
+  const identitiesByUser = new Map<number, UserEmailIdentity[]>();
   const seenByUser = new Map<number, Set<string>>();
 
   for (const row of rows.results ?? []) {
@@ -327,7 +398,7 @@ async function resolveUserAddressSets(
     const userId = Number(row.user_id);
     if (!seenByUser.has(userId)) {
       seenByUser.set(userId, new Set());
-      emailsByUser.set(userId, []);
+      identitiesByUser.set(userId, []);
     }
 
     const seen = seenByUser.get(userId) as Set<string>;
@@ -335,18 +406,39 @@ async function resolveUserAddressSets(
       continue;
     }
 
+    const displayName = String(row.display_name ?? '').trim();
+    if (!displayName) {
+      throw new Error(`User ${userId} has address ${normalized} without a display name`);
+    }
+
     seen.add(normalized);
-    (emailsByUser.get(userId) as string[]).push(normalized);
+    (identitiesByUser.get(userId) as UserEmailIdentity[]).push({
+      address: normalized,
+      name: displayName,
+      isPrimary: Number(row.is_primary ?? 0) === 1,
+    });
   }
 
   for (const userId of uniqueUserIds) {
-    const emails = emailsByUser.get(userId) ?? [];
-    const primaryEmail = emails[0] ?? '';
-    if (!primaryEmail) {
+    const emailIdentities = identitiesByUser.get(userId) ?? [];
+    const primaryIdentity = emailIdentities[0];
+    if (!primaryIdentity) {
       throw new Error(`User ${userId} has no email addresses configured`);
     }
 
-    addressSets.set(userId, { primaryEmail, emails });
+    const emails = emailIdentities.map((identity) => identity.address);
+    const nameByEmail = new Map<string, string>();
+    for (const identity of emailIdentities) {
+      nameByEmail.set(identity.address, identity.name);
+    }
+
+    addressSets.set(userId, {
+      primaryEmail: primaryIdentity.address,
+      primaryName: primaryIdentity.name,
+      emails,
+      emailIdentities,
+      nameByEmail,
+    });
   }
 
   return addressSets;
@@ -369,14 +461,19 @@ async function setUserRole(env: Env, userId: number, role: UserRole): Promise<vo
 async function replaceUserEmailAddresses(
   env: Env,
   userId: number,
-  emails: string[],
+  identities: ManagedEmailIdentity[],
   options: {
     syncPrimaryUserEmail?: boolean;
     senderIdByEmail?: ReadonlyMap<string, string>;
   } = {}
 ): Promise<void> {
+  if (identities.length === 0) {
+    throw new Error('At least one email identity is required');
+  }
+
   const senderOcidByEmail = new Map<string, string>();
-  for (const emailAddress of emails) {
+  for (const identity of identities) {
+    const emailAddress = identity.address;
     const senderId = String(options.senderIdByEmail?.get(emailAddress) ?? '').trim();
     if (!senderId) {
       throw new Error(`Missing OCI sender OCID for ${emailAddress}`);
@@ -389,22 +486,28 @@ async function replaceUserEmailAddresses(
     .bind(userId)
     .run();
 
-  if (emails.length > 0) {
+  if (identities.length > 0) {
     await env.DB.batch(
-      emails.map((email, index) =>
+      identities.map((identity, index) =>
         env.DB.prepare(
           `
-            INSERT INTO user_addresses (user_id, address, is_primary, oci_sender_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO user_addresses (user_id, address, display_name, is_primary, oci_sender_id)
+            VALUES (?, ?, ?, ?, ?)
           `
-        ).bind(userId, email, index === 0 ? 1 : 0, senderOcidByEmail.get(email))
+        ).bind(
+          userId,
+          identity.address,
+          identity.name,
+          index === 0 ? 1 : 0,
+          senderOcidByEmail.get(identity.address)
+        )
       )
     );
   }
 
   if (options.syncPrimaryUserEmail !== false) {
     await env.DB.prepare('UPDATE users SET email = ? WHERE id = ?')
-      .bind(emails[0], userId)
+      .bind(identities[0].address, userId)
       .run();
   }
 }
@@ -447,8 +550,11 @@ async function listAdminUsers(env: Env): Promise<
     id: number;
     username: string;
     role: UserRole;
+    name: string;
+    primaryName: string;
     primaryEmail: string;
     emails: string[];
+    emailIdentities: UserEmailIdentity[];
     createdAt: string;
   }>
 > {
@@ -475,8 +581,11 @@ async function listAdminUsers(env: Env): Promise<
       id: row.id,
       username: row.username,
       role: normalizeRole(row.role),
+      name: addressSet.primaryName,
+      primaryName: addressSet.primaryName,
       primaryEmail: addressSet.primaryEmail,
       emails: addressSet.emails,
+      emailIdentities: addressSet.emailIdentities,
       createdAt: row.created_at,
     };
   });
@@ -489,8 +598,11 @@ async function getAdminUserById(
   id: number;
   username: string;
   role: UserRole;
+  name: string;
+  primaryName: string;
   primaryEmail: string;
   emails: string[];
+  emailIdentities: UserEmailIdentity[];
   createdAt: string;
 } | null> {
   const row = await env.DB.prepare(
@@ -519,8 +631,11 @@ async function getAdminUserById(
     id: row.id,
     username: row.username,
     role: normalizeRole(row.role),
+    name: addressSet.primaryName,
+    primaryName: addressSet.primaryName,
     primaryEmail: addressSet.primaryEmail,
     emails: addressSet.emails,
+    emailIdentities: addressSet.emailIdentities,
     createdAt: row.created_at,
   };
 }
@@ -773,7 +888,7 @@ api.post(
     isLoginBlocked(c.env, throttleKey),
     c.env.DB.prepare(
       `
-        SELECT users.id, users.password_hash, COALESCE(user_roles.role, 'user') AS role
+        SELECT users.id, users.username, users.password_hash, COALESCE(user_roles.role, 'user') AS role
         FROM users
         LEFT JOIN user_roles ON user_roles.user_id = users.id
         WHERE users.username = ?
@@ -781,7 +896,7 @@ api.post(
       `
     )
       .bind(username)
-      .first<{ id: number; password_hash: string; role: string | null }>(),
+      .first<{ id: number; username: string; password_hash: string; role: string | null }>(),
   ]);
 
   if (throttleState.blocked) {
@@ -815,8 +930,11 @@ api.post(
   return c.json({
     token: session.token,
     email: userAddressSet.primaryEmail,
+    primaryName: userAddressSet.primaryName,
+    emailIdentities: userAddressSet.emailIdentities,
     emails: userAddressSet.emails,
-    username,
+    username: user.username,
+    name: userAddressSet.primaryName,
     role: normalizeRole(user.role),
     expiresAt: session.expiresAt,
   });
@@ -863,8 +981,11 @@ api.get('/me', async (c) => {
   return c.json({
     id: user.id,
     email: userAddressSet.primaryEmail,
+    primaryName: userAddressSet.primaryName,
+    emailIdentities: userAddressSet.emailIdentities,
     emails: userAddressSet.emails,
     username: user.username,
+    name: userAddressSet.primaryName,
     role: user.role,
   });
 });
@@ -1141,6 +1262,7 @@ api.post(
 
   const userAddressSet = await resolveUserAddressSet(c.env, user.id);
   let fromAddress = userAddressSet.primaryEmail;
+  let fromName = userAddressSet.primaryName;
 
   if (typeof body.from === 'string' && body.from.trim().length > 0) {
     const normalizedFrom = normalizeEmailAddress(body.from);
@@ -1149,11 +1271,12 @@ api.post(
       return c.json({ error: 'from must be a valid email address' }, 400);
     }
 
-    if (!userAddressSet.emails.includes(normalizedFrom)) {
+    if (!userAddressSet.nameByEmail.has(normalizedFrom)) {
       return c.json({ error: 'from address is not assigned to this account' }, 403);
     }
 
     fromAddress = normalizedFrom;
+    fromName = userAddressSet.nameByEmail.get(normalizedFrom) ?? userAddressSet.primaryName;
   }
 
   if (body.attachments !== undefined && !Array.isArray(body.attachments)) {
@@ -1254,6 +1377,7 @@ api.post(
 
     await sendEmail(c.env, {
       from: fromAddress,
+      fromName,
       to: body.to,
       subject: body.subject,
       text: body.text,
@@ -1265,7 +1389,7 @@ api.post(
       })),
     });
 
-    return c.json({ ok: true, sentEmailId, from: fromAddress });
+    return c.json({ ok: true, sentEmailId, from: fromAddress, fromName });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('Send failed:', err);
@@ -1304,18 +1428,27 @@ api.post(
   '/admin/users',
   zValidator('json', adminUserCreateSchema, (result, c) => {
     if (!result.success) {
-      return c.json({ error: 'username, password, role, and primaryEmail are required' }, 400);
+      return c.json(
+        { error: 'username, password, role, primaryEmail, and primaryName are required' },
+        400
+      );
     }
   }),
   async (c) => {
     const body = c.req.valid('json');
 
-    let desiredEmails: string[];
+    let desiredIdentities: ManagedEmailIdentity[];
     try {
-      desiredEmails = normalizeManagedEmails(body.primaryEmail, body.emails ?? []);
+      desiredIdentities = normalizeManagedIdentities(
+        body.primaryEmail,
+        body.primaryName,
+        body.aliases ?? []
+      );
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : 'Invalid email list' }, 400);
     }
+
+    const desiredEmails = desiredIdentities.map((identity) => identity.address);
 
     const username = body.username.trim();
     const [usernameError, emailError] = await Promise.all([
@@ -1398,20 +1531,29 @@ api.post(
       }
 
       await Promise.all([
-        replaceUserEmailAddresses(c.env, inserted.id, desiredEmails, {
+        replaceUserEmailAddresses(c.env, inserted.id, desiredIdentities, {
           syncPrimaryUserEmail: false,
           senderIdByEmail: ensuredSenderIdByEmail,
         }),
         setUserRole(c.env, inserted.id, body.role),
       ]);
 
+      const primaryIdentity = desiredIdentities[0];
+
       return c.json(
         {
           id: inserted.id,
           username,
+          name: primaryIdentity.name,
+          primaryName: primaryIdentity.name,
           role: body.role,
           primaryEmail: desiredEmails[0],
           emails: desiredEmails,
+          emailIdentities: desiredIdentities.map((identity, index) => ({
+            address: identity.address,
+            name: identity.name,
+            isPrimary: index === 0,
+          })),
           createdAt: inserted.created_at,
         },
         201
@@ -1469,9 +1611,15 @@ api.put(
 
     const username = (body.username ?? existing.username).trim();
     const role: UserRole = body.role ?? existing.role;
-    const existingAliases = existing.emails.filter((email) => email !== existing.primaryEmail);
+    const existingAliases = existing.emailIdentities
+      .filter((identity) => identity.address !== existing.primaryEmail)
+      .map((identity) => ({
+        address: identity.address,
+        name: identity.name,
+      }));
     const requestedPrimaryEmail = body.primaryEmail ?? existing.primaryEmail;
-    const requestedAliases = body.emails ?? existingAliases;
+    const requestedPrimaryName = body.primaryName ?? existing.primaryName;
+    const requestedAliases = body.aliases ?? existingAliases;
 
     if (existing.role === 'admin' && role !== 'admin') {
       const adminCount = await countAdminUsers(c.env);
@@ -1480,12 +1628,18 @@ api.put(
       }
     }
 
-    let desiredEmails: string[];
+    let desiredIdentities: ManagedEmailIdentity[];
     try {
-      desiredEmails = normalizeManagedEmails(requestedPrimaryEmail, requestedAliases);
+      desiredIdentities = normalizeManagedIdentities(
+        requestedPrimaryEmail,
+        requestedPrimaryName,
+        requestedAliases
+      );
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : 'Invalid email list' }, 400);
     }
+
+    const desiredEmails = desiredIdentities.map((identity) => identity.address);
 
     const [usernameError, emailError] = await Promise.all([
       validateUsernameAvailability(c.env, username, userId),
@@ -1573,7 +1727,7 @@ api.put(
         .run();
 
       await Promise.all([
-        replaceUserEmailAddresses(c.env, userId, desiredEmails, {
+        replaceUserEmailAddresses(c.env, userId, desiredIdentities, {
           senderIdByEmail: desiredSenderIdByEmail,
         }),
         setUserRole(c.env, userId, role),
@@ -1638,12 +1792,21 @@ api.put(
 
     const warning = await staleSenderWarningPromise;
 
+    const primaryIdentity = desiredIdentities[0];
+
     return c.json({
       id: userId,
       username,
+      name: primaryIdentity.name,
+      primaryName: primaryIdentity.name,
       role,
       primaryEmail: desiredEmails[0],
       emails: desiredEmails,
+      emailIdentities: desiredIdentities.map((identity, index) => ({
+        address: identity.address,
+        name: identity.name,
+        isPrimary: index === 0,
+      })),
       createdAt: existing.createdAt,
       ...(warning ? { warning } : {}),
     });

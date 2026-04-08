@@ -364,6 +364,11 @@ export function getAdminConsoleHtml(): string {
         <div class="panel-body">
           <form id="userForm" style="display:flex;flex-direction:column;gap:10px;">
             <label>
+              Primary Display Name
+              <input id="name" type="text" maxlength="160" required />
+            </label>
+
+            <label>
               Username
               <input id="username" type="text" maxlength="120" required />
             </label>
@@ -382,8 +387,8 @@ export function getAdminConsoleHtml(): string {
             </label>
 
             <label>
-              Alias Emails
-              <textarea id="aliasEmails" placeholder="One email per line, or comma-separated"></textarea>
+              Alias Identities
+              <textarea id="aliasEmails" placeholder="One per line: Display Name &lt;alias@example.com&gt; (or just alias@example.com to reuse primary name)"></textarea>
             </label>
 
             <label>
@@ -412,6 +417,7 @@ export function getAdminConsoleHtml(): string {
             <thead>
               <tr>
                 <th>ID</th>
+                <th>Name</th>
                 <th>Username</th>
                 <th>Role</th>
                 <th>Primary</th>
@@ -453,11 +459,31 @@ export function getAdminConsoleHtml(): string {
       el.className = 'status' + (tone ? ' ' + tone : '');
     }
 
-    function splitAliasEmails(raw) {
+    function splitAliasIdentityLines(raw) {
       return String(raw || '')
-        .split(/[\\n,;]/)
-        .map((part) => String(part || '').trim().toLowerCase())
+        .split(/[\n;]/)
+        .map((part) => String(part || '').trim())
         .filter((part) => part.length > 0);
+    }
+
+    function parseAliasIdentities(raw, defaultName) {
+      const aliases = [];
+      const fallbackName = String(defaultName || '').trim();
+
+      for (const line of splitAliasIdentityLines(raw)) {
+        const bracketMatch = /^(.*?)<([^<>]+)>$/.exec(line);
+        const address = (bracketMatch ? bracketMatch[2] : line).trim().toLowerCase();
+        const parsedName = bracketMatch ? String(bracketMatch[1] || '').trim() : '';
+        const name = parsedName || fallbackName;
+
+        if (!address || !name) {
+          continue;
+        }
+
+        aliases.push({ address, name });
+      }
+
+      return aliases;
     }
 
     async function apiFetch(path, method, body) {
@@ -513,19 +539,33 @@ export function getAdminConsoleHtml(): string {
       }
 
       const username = byId('username');
+      const nameInput = byId('name');
       const role = byId('role');
       const primaryEmail = byId('primaryEmail');
       const aliasEmails = byId('aliasEmails');
 
+      const primaryName = String(user.primaryName || user.name || '');
+
+      if (nameInput) nameInput.value = primaryName;
       if (username) username.value = String(user.username || '');
       if (role) role.value = String(user.role || 'user');
       if (primaryEmail) primaryEmail.value = String(user.primaryEmail || '');
 
-      const aliases = Array.isArray(user.emails)
-        ? user.emails.filter((email) => String(email || '').toLowerCase() !== String(user.primaryEmail || '').toLowerCase())
+      const aliasIdentityLines = Array.isArray(user.emailIdentities)
+        ? user.emailIdentities
+            .filter((identity) => String(identity.address || '').toLowerCase() !== String(user.primaryEmail || '').toLowerCase())
+            .map((identity) => {
+              const address = String(identity.address || '').toLowerCase();
+              const identityName = String(identity.name || '').trim();
+              if (!identityName || identityName === primaryName) {
+                return address;
+              }
+
+              return identityName + ' <' + address + '>';
+            })
         : [];
 
-      if (aliasEmails) aliasEmails.value = aliases.join('\\n');
+      if (aliasEmails) aliasEmails.value = aliasIdentityLines.join('\n');
       if (passwordInput) passwordInput.value = '';
       setStatus('formStatus', '', '');
     }
@@ -543,12 +583,25 @@ export function getAdminConsoleHtml(): string {
 
       empty.style.display = 'none';
       body.innerHTML = users.map((user) => {
-        const emails = Array.isArray(user.emails) ? user.emails : [];
+        const identities = Array.isArray(user.emailIdentities) ? user.emailIdentities : [];
+        const primaryName = String(user.primaryName || user.name || '');
+        const emails = identities.length > 0
+          ? identities.map((identity) => {
+              const address = String(identity.address || '');
+              const identityName = String(identity.name || '').trim();
+              if (!identityName || identityName === primaryName) {
+                return address;
+              }
+
+              return identityName + ' <' + address + '>';
+            })
+          : (Array.isArray(user.emails) ? user.emails : []);
         const createdAt = user.createdAt ? new Date(user.createdAt).toLocaleString() : '';
         const roleClass = String(user.role || '').toLowerCase() === 'admin' ? 'role-pill' : 'role-pill user';
 
         return '<tr>' +
           '<td>' + esc(user.id) + '</td>' +
+          '<td>' + esc(primaryName) + '</td>' +
           '<td>' + esc(user.username) + '</td>' +
           '<td><span class="' + roleClass + '">' + esc(user.role) + '</span></td>' +
           '<td>' + esc(user.primaryEmail) + '</td>' +
@@ -590,6 +643,7 @@ export function getAdminConsoleHtml(): string {
     }
 
     function getFormPayload() {
+      const nameInput = byId('name');
       const username = byId('username');
       const role = byId('role');
       const primaryEmail = byId('primaryEmail');
@@ -597,10 +651,14 @@ export function getAdminConsoleHtml(): string {
       const password = byId('password');
 
       const payload = {
+        primaryName: nameInput ? String(nameInput.value || '').trim() : '',
         username: username ? String(username.value || '').trim() : '',
         role: role ? String(role.value || 'user') : 'user',
         primaryEmail: primaryEmail ? String(primaryEmail.value || '').trim().toLowerCase() : '',
-        emails: splitAliasEmails(aliasEmails ? aliasEmails.value : ''),
+        aliases: parseAliasIdentities(
+          aliasEmails ? aliasEmails.value : '',
+          nameInput ? String(nameInput.value || '').trim() : ''
+        ),
       };
 
       const passwordValue = password ? String(password.value || '') : '';
@@ -615,8 +673,8 @@ export function getAdminConsoleHtml(): string {
       event.preventDefault();
       const payload = getFormPayload();
 
-      if (!payload.username || !payload.primaryEmail) {
-        setStatus('formStatus', 'Username and primary email are required.', 'error');
+      if (!payload.primaryName || !payload.username || !payload.primaryEmail) {
+        setStatus('formStatus', 'Primary display name, username, and primary email are required.', 'error');
         return;
       }
 
@@ -654,7 +712,9 @@ export function getAdminConsoleHtml(): string {
 
     async function deleteUser(userId) {
       const target = users.find((user) => Number(user.id) === Number(userId));
-      const label = target ? String(target.username) : 'this user';
+      const label = target
+        ? String(target.name || target.username)
+        : 'this user';
 
       if (!window.confirm('Delete ' + label + '? This removes the account and its approved senders.')) {
         return;
@@ -755,7 +815,8 @@ export function getAdminConsoleHtml(): string {
 
       const whoami = byId('whoami');
       if (whoami) {
-        whoami.textContent = 'Signed in as ' + String(me.username || 'unknown') + ' (' + String(me.email || 'no-email') + ')';
+        const displayName = String(me.primaryName || me.name || me.username || 'unknown');
+        whoami.textContent = 'Signed in as ' + displayName + ' (' + String(me.email || 'no-email') + ')';
       }
 
       setEditMode(null);

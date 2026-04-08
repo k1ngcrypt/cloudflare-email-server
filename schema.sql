@@ -31,12 +31,12 @@ WHERE user_id = (
 )
 AND (SELECT COUNT(*) FROM user_roles WHERE role = 'admin') = 0;
 
-
 -- User address aliases: one user can own multiple inbound/outbound email addresses.
 CREATE TABLE IF NOT EXISTS user_addresses (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   address       TEXT NOT NULL UNIQUE,
+  display_name  TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
   oci_sender_id TEXT NOT NULL CHECK(length(trim(oci_sender_id)) > 0),
   is_primary    INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0, 1)),
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))

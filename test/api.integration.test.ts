@@ -166,6 +166,7 @@ describe('worker HTTP API integration', () => {
 
     expect(loginResult.response.status).toBe(200);
     expect(typeof loginResult.body.token).toBe('string');
+    expect(loginResult.body.name).toBe(user.name);
 
     const setCookie = loginResult.response.headers.get('set-cookie');
     expect(setCookie).toContain('session_token=');
@@ -186,8 +187,11 @@ describe('worker HTTP API integration', () => {
     expect(meResponse.status).toBe(200);
     expect(meResponse.headers.get('access-control-allow-origin')).toBe('https://webmail.test');
 
-    const meBody = await readJson<{ username: string; email: string; emails: string[] }>(meResponse);
+    const meBody = await readJson<{ username: string; name: string; email: string; emails: string[] }>(
+      meResponse
+    );
     expect(meBody.username).toBe(user.username);
+    expect(meBody.name).toBe(user.name);
     expect(meBody.email).toBe(user.email);
     expect(meBody.emails).toContain(user.email);
 
@@ -814,11 +818,14 @@ describe('worker HTTP API integration', () => {
   it('returns account address aliases from /api/me and validates selected from address ownership', async () => {
     const session = await createAuthenticatedSession({
       username: 'multi-address-composer',
+      name: 'Primary Composer',
       email: 'primary-compose@mail.example.test',
       password: 'Compose-Multi-Pass-123',
     });
 
-    await addUserEmailAddress(session.id, 'alias-compose@mail.example.test');
+    await addUserEmailAddress(session.id, 'alias-compose@mail.example.test', {
+      displayName: 'Alias Composer',
+    });
 
     const meResponse = await apiRequest('/api/me', {
       headers: {
@@ -827,11 +834,31 @@ describe('worker HTTP API integration', () => {
     });
 
     expect(meResponse.status).toBe(200);
-    const meBody = await readJson<{ email: string; emails: string[] }>(meResponse);
+    const meBody = await readJson<{
+      email: string;
+      name: string;
+      primaryName: string;
+      emails: string[];
+      emailIdentities: Array<{ address: string; name: string; isPrimary: boolean }>;
+    }>(meResponse);
     expect(meBody.email).toBe('primary-compose@mail.example.test');
+    expect(meBody.name).toBe('Primary Composer');
+    expect(meBody.primaryName).toBe('Primary Composer');
     expect(meBody.emails).toEqual([
       'primary-compose@mail.example.test',
       'alias-compose@mail.example.test',
+    ]);
+    expect(meBody.emailIdentities).toEqual([
+      {
+        address: 'primary-compose@mail.example.test',
+        name: 'Primary Composer',
+        isPrimary: true,
+      },
+      {
+        address: 'alias-compose@mail.example.test',
+        name: 'Alias Composer',
+        isPrimary: false,
+      },
     ]);
 
     const unauthorizedFromResponse = await apiRequest('/api/send', {
@@ -922,6 +949,7 @@ describe('worker HTTP API integration', () => {
     const payload = await readJson<{
       id: number;
       username: string;
+      name: string;
       role: string;
       primaryEmail: string;
       emails: string[];
@@ -929,6 +957,7 @@ describe('worker HTTP API integration', () => {
 
     expect(payload.id).toBe(targetUser.id);
     expect(payload.username).toBe('member-partial-updated');
+    expect(payload.name).toBe(targetUser.name);
     expect(payload.role).toBe('user');
     expect(payload.primaryEmail).toBe('member-partial-update@mail.example.test');
     expect(payload.emails).toContain('member-partial-update@mail.example.test');

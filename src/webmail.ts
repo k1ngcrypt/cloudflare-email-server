@@ -713,6 +713,19 @@ export function getWebmailHtml(): string {
   function deriveSenderAddresses(payload) {
     const candidates = [];
 
+    if (payload && Array.isArray(payload.emailIdentities)) {
+      for (const identity of payload.emailIdentities) {
+        if (!identity || typeof identity !== 'object') {
+          continue;
+        }
+
+        const normalized = normalizeAddress(identity.address);
+        if (normalized) {
+          candidates.push(normalized);
+        }
+      }
+    }
+
     if (payload && Array.isArray(payload.emails)) {
       for (const value of payload.emails) {
         const normalized = normalizeAddress(value);

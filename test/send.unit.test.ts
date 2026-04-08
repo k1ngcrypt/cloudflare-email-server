@@ -68,6 +68,7 @@ describe('sendEmail', () => {
 
     await sendEmail(makeEnv(), {
       from: 'sender@mail.example.test',
+      fromName: 'Sender Name',
       to: 'recipient@example.net',
       subject: 'Integration Subject',
       text: 'Plain body',
@@ -93,6 +94,8 @@ describe('sendEmail', () => {
 
     const rawMime = init.body as string;
     expect(rawMime).toContain('Subject:');
+    expect(rawMime).toMatch(/From:\s.+<sender@mail\.example\.test>/);
+    expect(rawMime).toContain('U2VuZGVyIE5hbWU');
     expect(rawMime).toContain('sender@mail.example.test');
     expect(rawMime).toContain('recipient@example.net');
     expect(rawMime).toContain('Plain body');
@@ -108,6 +111,7 @@ describe('sendEmail', () => {
 
     await sendEmail(makeEnv(), {
       from: 'sender@mail.example.test',
+      fromName: 'Sender Name',
       to: 'recipient@example.net',
       subject: 'Attachment Subject',
       text: 'Plain body',
@@ -136,6 +140,7 @@ describe('sendEmail', () => {
     await expect(
       sendEmail(makeEnv(), {
         from: 'sender@mail.example.test',
+        fromName: 'Sender Name',
         to: 'recipient@example.net',
         subject: 'Failure Subject',
         text: 'Body',

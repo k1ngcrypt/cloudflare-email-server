@@ -62,6 +62,7 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 - Passwords are stored using SHA-256 hashes.
 - RBAC roles are stored in `user_roles` (`admin` or `user`).
 - Accounts can own multiple email addresses in `user_addresses`; the primary address is the row marked with `is_primary = 1`.
+- Address records in `user_addresses` include a required display name; outbound mail uses the selected address's display name for MIME `From`.
 - API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.
 - Login attempts are throttled per `client-ip + username` key (`login_attempts` table in `schema.sql`).
 - If this project was already deployed before this update, re-run `npm run db:migrate` to create the new table/indexes.
@@ -83,6 +84,7 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 - Access: authenticated users with role `admin` only.
 - Features:
       - User create, read, update, delete
+      - Per-address display name management for primary and alias sender identities
       - Role editing (`admin` / `user`)
       - Primary and alias email management
       - Password reset/update
@@ -101,8 +103,8 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 Assign additional addresses to an existing account (replace values as needed):
 
 ```sql
-INSERT INTO user_addresses (user_id, address, is_primary)
-VALUES (42, 'support@example.com', 0);
+INSERT INTO user_addresses (user_id, address, display_name, oci_sender_id, is_primary)
+VALUES (42, 'support@example.com', 'Support Team', 'ocid1.sender.oc1..example', 0);
 ```
 
 Set an address as primary for an account:

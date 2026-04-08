@@ -56,6 +56,7 @@ const SCHEMA_STATEMENTS = [
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       address       TEXT NOT NULL UNIQUE,
+      display_name  TEXT NOT NULL CHECK(length(trim(display_name)) > 0),
       oci_sender_id TEXT NOT NULL CHECK(length(trim(oci_sender_id)) > 0),
       is_primary    INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0, 1)),
       created_at    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -157,6 +158,7 @@ const RESET_STATEMENTS = [
 export interface SeededUser {
   id: number;
   username: string;
+  name: string;
   email: string;
   password: string;
 }
@@ -183,10 +185,11 @@ export async function resetState(): Promise<void> {
 }
 
 export async function seedUser(
-  input: Partial<Pick<SeededUser, 'username' | 'email' | 'password'>> = {}
+  input: Partial<Pick<SeededUser, 'username' | 'name' | 'email' | 'password'>> = {}
 ): Promise<SeededUser> {
   const nonce = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
   const username = input.username ?? `user_${nonce}`;
+  const name = input.name ?? `User ${nonce}`;
   const email = input.email ?? `${username}@mail.example.test`;
   const password = input.password ?? 'correct horse battery staple';
   const passwordHash = await hashPassword(password);
@@ -204,16 +207,17 @@ export async function seedUser(
   await getBindings()
     .DB.prepare(
       `
-        INSERT INTO user_addresses (user_id, address, oci_sender_id, is_primary)
-        VALUES (?, ?, ?, 1)
+        INSERT INTO user_addresses (user_id, address, display_name, oci_sender_id, is_primary)
+        VALUES (?, ?, ?, ?, 1)
       `
     )
-    .bind(row.id, email.toLowerCase(), senderOcid)
+    .bind(row.id, email.toLowerCase(), name, senderOcid)
     .run();
 
   return {
     id: row.id,
     username,
+    name,
     email,
     password,
   };
@@ -222,11 +226,17 @@ export async function seedUser(
 export async function addUserEmailAddress(
   userId: number,
   address: string,
-  options: { isPrimary?: boolean; senderOcid?: string } = {}
+  options: { isPrimary?: boolean; senderOcid?: string; displayName?: string } = {}
 ): Promise<void> {
   const normalized = String(address || '').trim().toLowerCase();
   if (!normalized) {
     throw new Error('Email address is required');
+  }
+
+  const displayName = String(options.displayName ?? normalized.split('@')[0] ?? '')
+    .trim();
+  if (!displayName) {
+    throw new Error('displayName is required');
   }
 
   const senderOcid = String(
@@ -241,15 +251,16 @@ export async function addUserEmailAddress(
   await getBindings()
     .DB.prepare(
       `
-        INSERT INTO user_addresses (user_id, address, oci_sender_id, is_primary)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO user_addresses (user_id, address, display_name, oci_sender_id, is_primary)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(address) DO UPDATE SET
           user_id = excluded.user_id,
+          display_name = excluded.display_name,
           oci_sender_id = excluded.oci_sender_id,
           is_primary = excluded.is_primary
       `
     )
-    .bind(userId, normalized, senderOcid, isPrimary)
+    .bind(userId, normalized, displayName, senderOcid, isPrimary)
     .run();
 
   if (isPrimary === 1) {
@@ -301,7 +312,7 @@ export async function login(
 }
 
 export async function createAuthenticatedSession(
-  input: Partial<Pick<SeededUser, 'username' | 'email' | 'password'>> = {}
+  input: Partial<Pick<SeededUser, 'username' | 'name' | 'email' | 'password'>> = {}
 ): Promise<AuthSession> {
   const user = await seedUser(input);
   const loginResult = await login(user.username, user.password);
