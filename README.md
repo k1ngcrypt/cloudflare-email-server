@@ -43,9 +43,10 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 1. Install dependencies: `npm install`
 2. Create D1 DB and update `wrangler.toml` with your `database_id`.
 3. Create an R2 bucket for attachments and keep the bucket name aligned with `wrangler.toml` (`webmail-attachments` by default).
-4. Apply `schema.sql`: `npm run db:migrate` or `wrangler d1 execute webmail-db --file=./schema.sql`
+4. Configure the `LOGIN_RATE_LIMITER` binding namespace IDs in `wrangler.toml` and `wrangler.test.toml` for your account.
+5. Apply `schema.sql`: `npm run db:migrate` or `wrangler d1 execute webmail-db --file=./schema.sql`
       - For production D1, run: `wrangler d1 execute webmail-db --remote --file=./schema.sql`
-5. Set secrets with Wrangler:
+6. Set secrets with Wrangler:
       - `OCI_EMAIL_API_TENANCY_OCID`
       - `OCI_EMAIL_API_USER_OCID`
       - `OCI_EMAIL_API_KEY_FINGERPRINT`
@@ -54,8 +55,8 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
        - Optional: `OCI_EMAIL_CONTROL_ENDPOINT`
              - If omitted, control-plane endpoint is derived from `OCI_EMAIL_ENDPOINT` region.
    - `AUTH_SECRET`
-6. Optional: set `APP_ORIGIN` in Wrangler vars if the UI is served from a different trusted origin.
-7. Configure `.dev.vars` for local development (see `.dev.vars.example`).
+7. Optional: set `APP_ORIGIN` in Wrangler vars if the UI is served from a different trusted origin.
+8. Configure `.dev.vars` for local development (see `.dev.vars.example`).
 
 ## Security Notes
 
@@ -64,8 +65,8 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 - Accounts can own multiple email addresses in `user_addresses`; the primary address is the row marked with `is_primary = 1`.
 - Address records in `user_addresses` include a required display name; outbound mail uses the selected address's display name for MIME `From`.
 - API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.
-- Login attempts are throttled per `client-ip + username` key (`login_attempts` table in `schema.sql`).
-- If this project was already deployed before this update, re-run `npm run db:migrate` to create the new table/indexes.
+- Login attempts are rate limited per `client-ip + username` key using the Cloudflare `LOGIN_RATE_LIMITER` binding in `wrangler.toml`.
+- Running `npm run db:migrate` on existing deployments removes legacy `login_attempts` table/index artifacts.
 - Outbound email is sent with OCI Email Delivery Submission HTTPS API over TLS on port 443 and signed with OCI Signature Version 1.
 - Admin user CRUD also synchronizes OCI Email Delivery approved senders through the control-plane Sender APIs (`listSenders`, `createSender`, `deleteSender`).
 

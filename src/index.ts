@@ -4,6 +4,7 @@ import { handleRequest } from './api';
 export interface Env {
   DB: D1Database;
   ATTACHMENTS: R2Bucket;
+  LOGIN_RATE_LIMITER: RateLimit;
   APP_ORIGIN?: string;
   OCI_EMAIL_ENDPOINT: string;
   OCI_EMAIL_CONTROL_ENDPOINT?: string;

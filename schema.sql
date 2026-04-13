@@ -97,20 +97,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at    TEXT NOT NULL
 );
 
--- Login attempt throttling (per client IP + username key)
-CREATE TABLE IF NOT EXISTS login_attempts (
-  throttle_key      TEXT PRIMARY KEY,
-  attempt_count     INTEGER NOT NULL DEFAULT 0,
-  window_started_at TEXT NOT NULL,
-  blocked_until     TEXT,
-  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
-);
+-- Legacy DB-backed login throttling table/index are no longer used.
+DROP INDEX IF EXISTS idx_login_attempts_blocked;
+DROP TABLE IF EXISTS login_attempts;
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_emails_user_folder ON emails(user_id, folder);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
-CREATE INDEX IF NOT EXISTS idx_login_attempts_blocked ON login_attempts(blocked_until);
 CREATE INDEX IF NOT EXISTS idx_sent_user_time ON sent_emails(user_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_user ON user_addresses(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_address ON user_addresses(address);

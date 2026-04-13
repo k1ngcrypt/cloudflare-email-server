@@ -2,21 +2,11 @@ import type { Env } from './index';
 
 const TOKEN_COOKIE_NAME = 'session_token';
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
-
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_MAX_FAILURES = 10;
-const LOGIN_BLOCK_MS = 15 * 60 * 1000;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/i;
 
 const textEncoder = new TextEncoder();
 let cachedAuthSecret: string | null = null;
 let cachedAuthSecretKeyPromise: Promise<CryptoKey> | null = null;
-
-interface LoginAttemptRow {
-  attempt_count: number;
-  window_started_at: string;
-  blocked_until: string | null;
-}
 
 export interface SessionInfo {
   token: string;
@@ -116,12 +106,6 @@ function randomToken(): string {
   return bytesToBase64Url(bytes);
 }
 
-function toMillis(value: string | null | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? 0 : parsed;
-}
-
 export function getSessionCookieName(): string {
   return TOKEN_COOKIE_NAME;
 }
@@ -205,129 +189,4 @@ export async function authenticate(
     username: session.username,
     role: session.role === 'admin' ? 'admin' : 'user',
   };
-}
-
-export async function isLoginBlocked(
-  env: Env,
-  throttleKey: string
-): Promise<{ blocked: boolean; retryAfterSeconds: number }> {
-  try {
-    const row = await env.DB.prepare(
-      `
-        SELECT attempt_count, window_started_at, blocked_until
-        FROM login_attempts
-        WHERE throttle_key = ?
-      `
-    )
-      .bind(throttleKey)
-      .first<LoginAttemptRow>();
-
-    if (!row) {
-      return { blocked: false, retryAfterSeconds: 0 };
-    }
-
-    const now = Date.now();
-    const blockedUntilMs = toMillis(row.blocked_until);
-
-    if (blockedUntilMs > now) {
-      return {
-        blocked: true,
-        retryAfterSeconds: Math.max(1, Math.ceil((blockedUntilMs - now) / 1000)),
-      };
-    }
-
-    if (now - toMillis(row.window_started_at) > LOGIN_WINDOW_MS) {
-      await env.DB.prepare('DELETE FROM login_attempts WHERE throttle_key = ?')
-        .bind(throttleKey)
-        .run();
-    }
-
-    return { blocked: false, retryAfterSeconds: 0 };
-  } catch (err) {
-    console.error('Login throttle check failed:', err);
-    return { blocked: false, retryAfterSeconds: 0 };
-  }
-}
-
-export async function recordFailedLoginAttempt(
-  env: Env,
-  throttleKey: string
-): Promise<{ blocked: boolean; retryAfterSeconds: number }> {
-  try {
-    const row = await env.DB.prepare(
-      `
-        SELECT attempt_count, window_started_at
-        FROM login_attempts
-        WHERE throttle_key = ?
-      `
-    )
-      .bind(throttleKey)
-      .first<{ attempt_count: number; window_started_at: string }>();
-
-    const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
-
-    if (!row || nowMs - toMillis(row.window_started_at) > LOGIN_WINDOW_MS) {
-      await env.DB.prepare(
-        `
-          INSERT INTO login_attempts (throttle_key, attempt_count, window_started_at, blocked_until, updated_at)
-          VALUES (?, 1, ?, NULL, ?)
-          ON CONFLICT(throttle_key) DO UPDATE SET
-            attempt_count = 1,
-            window_started_at = excluded.window_started_at,
-            blocked_until = NULL,
-            updated_at = excluded.updated_at
-        `
-      )
-        .bind(throttleKey, nowIso, nowIso)
-        .run();
-
-      return { blocked: false, retryAfterSeconds: 0 };
-    }
-
-    const nextCount = row.attempt_count + 1;
-    if (nextCount >= LOGIN_MAX_FAILURES) {
-      const blockedUntilIso = new Date(nowMs + LOGIN_BLOCK_MS).toISOString();
-
-      await env.DB.prepare(
-        `
-          UPDATE login_attempts
-          SET attempt_count = ?, blocked_until = ?, updated_at = ?
-          WHERE throttle_key = ?
-        `
-      )
-        .bind(nextCount, blockedUntilIso, nowIso, throttleKey)
-        .run();
-
-      return {
-        blocked: true,
-        retryAfterSeconds: Math.max(1, Math.ceil(LOGIN_BLOCK_MS / 1000)),
-      };
-    }
-
-    await env.DB.prepare(
-      `
-        UPDATE login_attempts
-        SET attempt_count = ?, blocked_until = NULL, updated_at = ?
-        WHERE throttle_key = ?
-      `
-    )
-      .bind(nextCount, nowIso, throttleKey)
-      .run();
-
-    return { blocked: false, retryAfterSeconds: 0 };
-  } catch (err) {
-    console.error('Failed to record login attempt:', err);
-    return { blocked: false, retryAfterSeconds: 0 };
-  }
-}
-
-export async function clearLoginAttempts(env: Env, throttleKey: string): Promise<void> {
-  try {
-    await env.DB.prepare('DELETE FROM login_attempts WHERE throttle_key = ?')
-      .bind(throttleKey)
-      .run();
-  } catch (err) {
-    console.error('Failed to clear login attempts:', err);
-  }
 }

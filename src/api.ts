@@ -12,13 +12,10 @@ import { getLoginHtml } from './login';
 import { getWebmailHtml } from './webmail.ts';
 import {
   authenticate,
-  clearLoginAttempts,
   createSession,
   getLoginThrottleKey,
   getSessionCookieName,
   hashPassword,
-  isLoginBlocked,
-  recordFailedLoginAttempt,
   revokeSession,
   verifyPassword,
 } from './auth';
@@ -45,6 +42,7 @@ const MAX_ATTACHMENT_COUNT = 10;
 const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const CORS_ALLOW_HEADERS = ['Content-Type', 'Authorization', 'Idempotency-Key'];
 const CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
+const LOGIN_RATE_LIMIT_PERIOD_SECONDS = 60;
 
 interface AttachmentSummary {
   id: number;
@@ -196,16 +194,6 @@ function requiredPayloadErrorForPath(path: string): string {
   }
 
   return 'Invalid JSON payload';
-}
-
-async function failedLoginResponse(c: Context<AppBindings>, throttleKey: string): Promise<Response> {
-  const loginState = await recordFailedLoginAttempt(c.env, throttleKey);
-  if (loginState.blocked) {
-    c.header('Retry-After', String(loginState.retryAfterSeconds));
-    return c.json({ error: 'Too many login attempts. Try again later.' }, 429);
-  }
-
-  return c.json({ error: 'Invalid credentials' }, 401);
 }
 
 async function resolveUserAddressSet(
@@ -870,6 +858,29 @@ api.post(
       return c.json({ error: 'username and password are required' }, 400);
     }
   }),
+  async (c, next) => {
+    const body = c.req.valid('json');
+    const username = body.username.trim();
+    if (username.length === 0) {
+      await next();
+      return;
+    }
+
+    try {
+      const throttleKey = getLoginThrottleKey(c.req.raw, username);
+      const { success } = await c.env.LOGIN_RATE_LIMITER.limit({ key: throttleKey });
+
+      if (!success) {
+        c.header('Retry-After', String(LOGIN_RATE_LIMIT_PERIOD_SECONDS));
+        return c.json({ error: 'Too many login attempts. Try again later.' }, 429);
+      }
+    } catch (err) {
+      // Keep auth available if the limiter binding is temporarily unavailable.
+      console.error('Login rate limit check failed:', err);
+    }
+
+    await next();
+  },
   async (c) => {
   const body = c.req.valid('json');
   if (
@@ -883,40 +894,30 @@ api.post(
     return c.json({ error: 'username and password are required' }, 400);
   }
 
-  const throttleKey = getLoginThrottleKey(c.req.raw, username);
-  const [throttleState, user] = await Promise.all([
-    isLoginBlocked(c.env, throttleKey),
-    c.env.DB.prepare(
-      `
-        SELECT users.id, users.username, users.password_hash, COALESCE(user_roles.role, 'user') AS role
-        FROM users
-        LEFT JOIN user_roles ON user_roles.user_id = users.id
-        WHERE users.username = ?
-        LIMIT 1
-      `
-    )
-      .bind(username)
-      .first<{ id: number; username: string; password_hash: string; role: string | null }>(),
-  ]);
-
-  if (throttleState.blocked) {
-    c.header('Retry-After', String(throttleState.retryAfterSeconds));
-    return c.json({ error: 'Too many login attempts. Try again later.' }, 429);
-  }
+  const user = await c.env.DB.prepare(
+    `
+      SELECT users.id, users.username, users.password_hash, COALESCE(user_roles.role, 'user') AS role
+      FROM users
+      LEFT JOIN user_roles ON user_roles.user_id = users.id
+      WHERE users.username = ?
+      LIMIT 1
+    `
+  )
+    .bind(username)
+    .first<{ id: number; username: string; password_hash: string; role: string | null }>();
 
   if (!user) {
-    return failedLoginResponse(c, throttleKey);
+    return c.json({ error: 'Invalid credentials' }, 401);
   }
 
   const passwordOk = await verifyPassword(body.password, user.password_hash);
   if (!passwordOk) {
-    return failedLoginResponse(c, throttleKey);
+    return c.json({ error: 'Invalid credentials' }, 401);
   }
 
   const [session, userAddressSet] = await Promise.all([
     createSession(c.env, user.id),
     resolveUserAddressSet(c.env, user.id),
-    clearLoginAttempts(c.env, throttleKey),
   ]);
 
   setCookie(c, getSessionCookieName(), session.token, {

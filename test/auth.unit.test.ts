@@ -3,12 +3,9 @@ import { env } from 'cloudflare:test';
 import type { Env } from '../src/index';
 import {
   authenticate,
-  clearLoginAttempts,
   createSession,
   getLoginThrottleKey,
   hashPassword,
-  isLoginBlocked,
-  recordFailedLoginAttempt,
   revokeSession,
   verifyPassword,
 } from '../src/auth';
@@ -136,52 +133,5 @@ describe('auth helper behavior', () => {
 
     const key = getLoginThrottleKey(request, '  MiXeD-Case-User  ');
     expect(key).toBe('203.0.113.44:mixed-case-user');
-  });
-
-  it('blocks after repeated failed logins and clearLoginAttempts removes that state', async () => {
-    const throttleKey = '198.51.100.44:blocked-user';
-
-    for (let attempt = 1; attempt <= 9; attempt += 1) {
-      const state = await recordFailedLoginAttempt(bindings(), throttleKey);
-      expect(state.blocked).toBe(false);
-    }
-
-    const blockedState = await recordFailedLoginAttempt(bindings(), throttleKey);
-    expect(blockedState.blocked).toBe(true);
-    expect(blockedState.retryAfterSeconds).toBeGreaterThan(0);
-
-    const blockedCheck = await isLoginBlocked(bindings(), throttleKey);
-    expect(blockedCheck.blocked).toBe(true);
-
-    await clearLoginAttempts(bindings(), throttleKey);
-
-    const afterClear = await isLoginBlocked(bindings(), throttleKey);
-    expect(afterClear.blocked).toBe(false);
-  });
-
-  it('deletes stale throttle windows during login block checks', async () => {
-    const throttleKey = '198.51.100.55:stale-user';
-    const staleTime = new Date(Date.now() - 20 * 60 * 1000).toISOString();
-
-    await bindings()
-      .DB.prepare(
-        `
-          INSERT INTO login_attempts
-            (throttle_key, attempt_count, window_started_at, blocked_until, updated_at)
-          VALUES (?, ?, ?, NULL, ?)
-        `
-      )
-      .bind(throttleKey, 5, staleTime, staleTime)
-      .run();
-
-    const state = await isLoginBlocked(bindings(), throttleKey);
-    expect(state.blocked).toBe(false);
-
-    const row = await bindings()
-      .DB.prepare('SELECT throttle_key FROM login_attempts WHERE throttle_key = ?')
-      .bind(throttleKey)
-      .first<{ throttle_key: string }>();
-
-    expect(row).toBeNull();
   });
 });
