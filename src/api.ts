@@ -234,9 +234,7 @@ interface AdminUserRow {
   role: string | null;
 }
 
-interface UserIdRow {
-  id: number;
-}
+type D1Statement = ReturnType<Env['DB']['prepare']>;
 
 interface UserAddressOwnerRow {
   user_id: number;
@@ -247,6 +245,7 @@ interface UserAddressByUserRow {
   address: string;
   display_name: string;
   is_primary: number;
+  oci_sender_id: string | null;
 }
 
 type ManagedEmailIdentity = {
@@ -254,14 +253,10 @@ type ManagedEmailIdentity = {
   name: string;
 };
 
-interface UserAddressSenderIdRow {
-  address: string;
-  oci_sender_id: string | null;
-}
-
-interface EmailAddressOwnerRow {
-  address: string;
-  user_id: number;
+interface IdentityAvailabilityRow {
+  entry_type: 'username' | 'email';
+  owner_id: number;
+  value: string;
 }
 
 function normalizeRole(role: string | null | undefined): UserRole {
@@ -331,32 +326,21 @@ function buildSqlPlaceholders(count: number): string {
   return Array.from({ length: count }, () => '?').join(', ');
 }
 
+type UserAddressSet = {
+  primaryEmail: string;
+  primaryName: string;
+  emails: string[];
+  emailIdentities: UserEmailIdentity[];
+  nameByEmail: Map<string, string>;
+  senderIdByEmail: Map<string, string>;
+};
+
 async function resolveUserAddressSets(
   env: Env,
   userIds: number[]
-): Promise<
-  Map<
-    number,
-    {
-      primaryEmail: string;
-      primaryName: string;
-      emails: string[];
-      emailIdentities: UserEmailIdentity[];
-      nameByEmail: Map<string, string>;
-    }
-  >
-> {
+): Promise<Map<number, UserAddressSet>> {
   const uniqueUserIds = Array.from(new Set(userIds.filter((userId) => Number.isSafeInteger(userId) && userId > 0)));
-  const addressSets = new Map<
-    number,
-    {
-      primaryEmail: string;
-      primaryName: string;
-      emails: string[];
-      emailIdentities: UserEmailIdentity[];
-      nameByEmail: Map<string, string>;
-    }
-  >();
+  const addressSets = new Map<number, UserAddressSet>();
 
   if (uniqueUserIds.length === 0) {
     return addressSets;
@@ -365,7 +349,7 @@ async function resolveUserAddressSets(
   const placeholders = buildSqlPlaceholders(uniqueUserIds.length);
   const rows = await env.DB.prepare(
     `
-      SELECT user_id, address, display_name, is_primary
+      SELECT user_id, address, display_name, is_primary, oci_sender_id
       FROM user_addresses
       WHERE user_id IN (${placeholders})
       ORDER BY user_id ASC, is_primary DESC, id ASC
@@ -376,6 +360,7 @@ async function resolveUserAddressSets(
 
   const identitiesByUser = new Map<number, UserEmailIdentity[]>();
   const seenByUser = new Map<number, Set<string>>();
+  const senderIdByUser = new Map<number, Map<string, string>>();
 
   for (const row of rows.results ?? []) {
     const normalized = normalizeEmailAddress(String(row.address ?? ''));
@@ -387,6 +372,7 @@ async function resolveUserAddressSets(
     if (!seenByUser.has(userId)) {
       seenByUser.set(userId, new Set());
       identitiesByUser.set(userId, []);
+      senderIdByUser.set(userId, new Map());
     }
 
     const seen = seenByUser.get(userId) as Set<string>;
@@ -405,6 +391,11 @@ async function resolveUserAddressSets(
       name: displayName,
       isPrimary: Number(row.is_primary ?? 0) === 1,
     });
+
+    const senderId = String(row.oci_sender_id ?? '').trim();
+    if (senderId) {
+      (senderIdByUser.get(userId) as Map<string, string>).set(normalized, senderId);
+    }
   }
 
   for (const userId of uniqueUserIds) {
@@ -419,6 +410,7 @@ async function resolveUserAddressSets(
     for (const identity of emailIdentities) {
       nameByEmail.set(identity.address, identity.name);
     }
+    const senderIdByEmail = senderIdByUser.get(userId) ?? new Map<string, string>();
 
     addressSets.set(userId, {
       primaryEmail: primaryIdentity.address,
@@ -426,14 +418,15 @@ async function resolveUserAddressSets(
       emails,
       emailIdentities,
       nameByEmail,
+      senderIdByEmail,
     });
   }
 
   return addressSets;
 }
 
-async function setUserRole(env: Env, userId: number, role: UserRole): Promise<void> {
-  await env.DB.prepare(
+function buildUserRoleUpsertStatement(env: Env, userId: number, role: UserRole): D1Statement {
+  return env.DB.prepare(
     `
       INSERT INTO user_roles (user_id, role, updated_at)
       VALUES (?, ?, datetime('now'))
@@ -442,88 +435,115 @@ async function setUserRole(env: Env, userId: number, role: UserRole): Promise<vo
         updated_at = excluded.updated_at
     `
   )
-    .bind(userId, role)
-    .run();
+    .bind(userId, role);
 }
 
-async function replaceUserEmailAddresses(
+function buildUserAddressInsertStatements(
   env: Env,
   userId: number,
   identities: ManagedEmailIdentity[],
-  options: {
-    syncPrimaryUserEmail?: boolean;
-    senderIdByEmail?: ReadonlyMap<string, string>;
-  } = {}
-): Promise<void> {
+  senderIdByEmail: ReadonlyMap<string, string>
+): D1Statement[] {
   if (identities.length === 0) {
     throw new Error('At least one email identity is required');
   }
 
-  const senderOcidByEmail = new Map<string, string>();
+  const statements: D1Statement[] = [];
+
   for (const identity of identities) {
     const emailAddress = identity.address;
-    const senderId = String(options.senderIdByEmail?.get(emailAddress) ?? '').trim();
+    const senderId = String(senderIdByEmail.get(emailAddress) ?? '').trim();
     if (!senderId) {
       throw new Error(`Missing OCI sender OCID for ${emailAddress}`);
     }
 
-    senderOcidByEmail.set(emailAddress, senderId);
-  }
-
-  await env.DB.prepare('DELETE FROM user_addresses WHERE user_id = ?')
-    .bind(userId)
-    .run();
-
-  if (identities.length > 0) {
-    await env.DB.batch(
-      identities.map((identity, index) =>
-        env.DB.prepare(
-          `
-            INSERT INTO user_addresses (user_id, address, display_name, is_primary, oci_sender_id)
-            VALUES (?, ?, ?, ?, ?)
-          `
-        ).bind(
-          userId,
-          identity.address,
-          identity.name,
-          index === 0 ? 1 : 0,
-          senderOcidByEmail.get(identity.address)
-        )
+    statements.push(
+      env.DB.prepare(
+        `
+          INSERT INTO user_addresses (user_id, address, display_name, is_primary, oci_sender_id)
+          VALUES (?, ?, ?, ?, ?)
+        `
+      ).bind(
+        userId,
+        identity.address,
+        identity.name,
+        statements.length === 0 ? 1 : 0,
+        senderId
       )
     );
   }
 
-  if (options.syncPrimaryUserEmail !== false) {
-    await env.DB.prepare('UPDATE users SET email = ? WHERE id = ?')
-      .bind(identities[0].address, userId)
-      .run();
-  }
+  return statements;
 }
 
-async function listUserSenderIdsByEmail(env: Env, userId: number): Promise<Map<string, string>> {
-  const rows = await env.DB.prepare(
-    `
-      SELECT address, oci_sender_id
-      FROM user_addresses
-      WHERE user_id = ?
-    `
-  )
-    .bind(userId)
-    .all<UserAddressSenderIdRow>();
+function buildReplaceUserAddressStatements(
+  env: Env,
+  userId: number,
+  identities: ManagedEmailIdentity[],
+  senderIdByEmail: ReadonlyMap<string, string>
+): D1Statement[] {
+  return [
+    env.DB.prepare('DELETE FROM user_addresses WHERE user_id = ?').bind(userId),
+    ...buildUserAddressInsertStatements(env, userId, identities, senderIdByEmail),
+  ];
+}
 
-  const senderIdByEmail = new Map<string, string>();
+async function initializeManagedUserState(
+  env: Env,
+  options: {
+    userId: number;
+    role: UserRole;
+    identities: ManagedEmailIdentity[];
+    senderIdByEmail: ReadonlyMap<string, string>;
+  }
+): Promise<void> {
+  const statements: D1Statement[] = [
+    buildUserRoleUpsertStatement(env, options.userId, options.role),
+    ...buildUserAddressInsertStatements(
+      env,
+      options.userId,
+      options.identities,
+      options.senderIdByEmail
+    ),
+  ];
 
-  for (const row of rows.results ?? []) {
-    const emailAddress = normalizeEmailAddress(String(row.address ?? ''));
-    const senderId = String(row.oci_sender_id ?? '').trim();
-    if (!emailAddress || !senderId) {
-      continue;
-    }
+  await env.DB.batch(statements);
+}
 
-    senderIdByEmail.set(emailAddress, senderId);
+async function persistManagedUserState(
+  env: Env,
+  options: {
+    userId: number;
+    username: string;
+    role: UserRole;
+    identities: ManagedEmailIdentity[];
+    senderIdByEmail: ReadonlyMap<string, string>;
+    passwordHash?: string | null;
+  }
+): Promise<void> {
+  const primaryEmail = options.identities[0]?.address;
+  if (!primaryEmail) {
+    throw new Error('At least one email identity is required');
   }
 
-  return senderIdByEmail;
+  const statements: D1Statement[] = [
+    buildUserRoleUpsertStatement(env, options.userId, options.role),
+    ...buildReplaceUserAddressStatements(
+      env,
+      options.userId,
+      options.identities,
+      options.senderIdByEmail
+    ),
+    env.DB.prepare(
+      `
+        UPDATE users
+        SET username = ?, email = ?, password_hash = COALESCE(?, password_hash)
+        WHERE id = ?
+      `
+    ).bind(options.username, primaryEmail, options.passwordHash ?? null, options.userId),
+  ];
+
+  await env.DB.batch(statements);
 }
 
 async function countAdminUsers(env: Env): Promise<number> {
@@ -591,6 +611,7 @@ async function getAdminUserById(
   primaryEmail: string;
   emails: string[];
   emailIdentities: UserEmailIdentity[];
+  senderIdByEmail: Map<string, string>;
   createdAt: string;
 } | null> {
   const row = await env.DB.prepare(
@@ -624,65 +645,70 @@ async function getAdminUserById(
     primaryEmail: addressSet.primaryEmail,
     emails: addressSet.emails,
     emailIdentities: addressSet.emailIdentities,
+    senderIdByEmail: addressSet.senderIdByEmail,
     createdAt: row.created_at,
   };
 }
 
-async function findUserIdByUsername(env: Env, username: string): Promise<number | null> {
-  const row = await env.DB.prepare('SELECT id FROM users WHERE username = ? LIMIT 1')
-    .bind(username)
-    .first<UserIdRow>();
-
-  return row?.id ?? null;
-}
-
-async function validateUsernameAvailability(
+async function validateAdminUserAvailability(
   env: Env,
   username: string,
-  currentUserId?: number
-): Promise<string | null> {
-  const ownerId = await findUserIdByUsername(env, username);
-  if (ownerId !== null && ownerId !== currentUserId) {
-    return 'username is already in use';
-  }
-
-  return null;
-}
-
-async function validateEmailAvailability(
-  env: Env,
   emails: string[],
   currentUserId?: number
 ): Promise<string | null> {
-  if (emails.length === 0) {
-    return null;
-  }
+  const uniqueEmails = Array.from(new Set(emails));
+  const emailFilterClause =
+    uniqueEmails.length > 0
+      ? `
+      UNION ALL
+      SELECT 'email' AS entry_type, user_id AS owner_id, address AS value
+      FROM user_addresses
+      WHERE address IN (${buildSqlPlaceholders(uniqueEmails.length)})
+      `
+      : '';
 
-  const placeholders = buildSqlPlaceholders(emails.length);
   const rows = await env.DB.prepare(
     `
-      SELECT address, user_id
-      FROM user_addresses
-      WHERE address IN (${placeholders})
+      SELECT 'username' AS entry_type, id AS owner_id, username AS value
+      FROM users
+      WHERE username = ?
+      ${emailFilterClause}
     `
   )
-    .bind(...emails)
-    .all<EmailAddressOwnerRow>();
+    .bind(username, ...uniqueEmails)
+    .all<IdentityAvailabilityRow>();
 
+  let usernameOwnerId: number | null = null;
   const ownerByEmail = new Map<string, number>();
+
   for (const row of rows.results ?? []) {
-    const normalized = normalizeEmailAddress(String(row.address ?? ''));
+    const ownerId = Number(row.owner_id);
+    if (!Number.isSafeInteger(ownerId) || ownerId <= 0) {
+      continue;
+    }
+
+    if (row.entry_type === 'username') {
+      usernameOwnerId = ownerId;
+      continue;
+    }
+
+    const normalized = normalizeEmailAddress(String(row.value ?? ''));
     if (!normalized) {
       continue;
     }
 
-    ownerByEmail.set(normalized, row.user_id);
+    ownerByEmail.set(normalized, ownerId);
   }
 
-  for (let i = 0; i < emails.length; i += 1) {
-    const ownerId = ownerByEmail.get(emails[i]) ?? null;
+  if (usernameOwnerId !== null && usernameOwnerId !== currentUserId) {
+    return 'username is already in use';
+  }
+
+  for (let i = 0; i < uniqueEmails.length; i += 1) {
+    const emailAddress = uniqueEmails[i];
+    const ownerId = ownerByEmail.get(emailAddress) ?? null;
     if (ownerId !== null && ownerId !== currentUserId) {
-      return `${emails[i]} is already assigned to another user`;
+      return `${emailAddress} is already assigned to another user`;
     }
   }
 
@@ -1452,17 +1478,9 @@ api.post(
     const desiredEmails = desiredIdentities.map((identity) => identity.address);
 
     const username = body.username.trim();
-    const [usernameError, emailError] = await Promise.all([
-      validateUsernameAvailability(c.env, username),
-      validateEmailAvailability(c.env, desiredEmails),
-    ]);
-
-    if (usernameError) {
-      return c.json({ error: usernameError }, 409);
-    }
-
-    if (emailError) {
-      return c.json({ error: emailError }, 409);
+    const availabilityError = await validateAdminUserAvailability(c.env, username, desiredEmails);
+    if (availabilityError) {
+      return c.json({ error: availabilityError }, 409);
     }
 
     const [passwordHashResult, approvedSendersResult] = await Promise.allSettled([
@@ -1531,13 +1549,12 @@ api.post(
         throw new Error('Failed to create user');
       }
 
-      await Promise.all([
-        replaceUserEmailAddresses(c.env, inserted.id, desiredIdentities, {
-          syncPrimaryUserEmail: false,
-          senderIdByEmail: ensuredSenderIdByEmail,
-        }),
-        setUserRole(c.env, inserted.id, body.role),
-      ]);
+      await initializeManagedUserState(c.env, {
+        userId: inserted.id,
+        role: body.role,
+        identities: desiredIdentities,
+        senderIdByEmail: ensuredSenderIdByEmail,
+      });
 
       const primaryIdentity = desiredIdentities[0];
 
@@ -1608,7 +1625,7 @@ api.put(
       return c.json({ error: 'User not found' }, 404);
     }
 
-    const existingSenderIdByEmail = await listUserSenderIdsByEmail(c.env, userId);
+    const existingSenderIdByEmail = existing.senderIdByEmail;
 
     const username = (body.username ?? existing.username).trim();
     const role: UserRole = body.role ?? existing.role;
@@ -1642,17 +1659,14 @@ api.put(
 
     const desiredEmails = desiredIdentities.map((identity) => identity.address);
 
-    const [usernameError, emailError] = await Promise.all([
-      validateUsernameAvailability(c.env, username, userId),
-      validateEmailAvailability(c.env, desiredEmails, userId),
-    ]);
-
-    if (usernameError) {
-      return c.json({ error: usernameError }, 409);
-    }
-
-    if (emailError) {
-      return c.json({ error: emailError }, 409);
+    const availabilityError = await validateAdminUserAvailability(
+      c.env,
+      username,
+      desiredEmails,
+      userId
+    );
+    if (availabilityError) {
+      return c.json({ error: availabilityError }, 409);
     }
 
     const oldEmails = existing.emails;
@@ -1723,22 +1737,14 @@ api.put(
     }
 
     try {
-      await c.env.DB.prepare('UPDATE users SET username = ? WHERE id = ?')
-        .bind(username, userId)
-        .run();
-
-      await Promise.all([
-        replaceUserEmailAddresses(c.env, userId, desiredIdentities, {
-          senderIdByEmail: desiredSenderIdByEmail,
-        }),
-        setUserRole(c.env, userId, role),
-      ]);
-
-      if (nextPasswordHash) {
-        await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-          .bind(nextPasswordHash, userId)
-          .run();
-      }
+      await persistManagedUserState(c.env, {
+        userId,
+        username,
+        role,
+        identities: desiredIdentities,
+        senderIdByEmail: desiredSenderIdByEmail,
+        passwordHash: nextPasswordHash,
+      });
     } catch (err) {
       console.error('Failed to update user in database:', err);
 
@@ -1837,7 +1843,7 @@ api.delete('/admin/users/:id', async (c) => {
     }
   }
 
-  const existingSenderIdByEmail = await listUserSenderIdsByEmail(c.env, userId);
+  const existingSenderIdByEmail = existing.senderIdByEmail;
 
   try {
     await removeApprovedSenders(c.env, existing.emails, {
