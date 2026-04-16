@@ -565,7 +565,7 @@ export function getAdminConsoleHtml(): string {
             })
         : [];
 
-      if (aliasEmails) aliasEmails.value = aliasIdentityLines.join('\\n');
+      if (aliasEmails) aliasEmails.value = aliasIdentityLines.join('\\\\n');
       if (passwordInput) passwordInput.value = '';
       setStatus('formStatus', '', '');
     }

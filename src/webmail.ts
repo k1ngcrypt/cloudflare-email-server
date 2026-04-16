@@ -701,6 +701,8 @@ export function getWebmailHtml(): string {
   let activeSenderAddress = '';
   let currentUserRole = 'user';
   const DRAFTS_KEY = 'webmail.local-drafts.v1';
+  const MAX_OUTBOUND_ATTACHMENT_COUNT = 10;
+  const MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
   function byId(id) {
     return document.getElementById(id);
@@ -1818,8 +1820,27 @@ export function getWebmailHtml(): string {
     const text = bodyInput ? String(bodyInput.value || '').trim() : '';
     const from = selectedFromAddress();
 
+    if (!to || !subject || !text) {
+      setSendStatus('To, subject, and message are required.', true);
+      return;
+    }
+
     const files = filesInput && filesInput.files ? Array.from(filesInput.files) : [];
     const attachments = [];
+
+    if (files.length > MAX_OUTBOUND_ATTACHMENT_COUNT) {
+      setSendStatus('Error: Too many attachments (max 10)', true);
+      return;
+    }
+
+    let totalAttachmentBytes = 0;
+    for (const file of files) {
+      totalAttachmentBytes += Number(file.size || 0);
+      if (totalAttachmentBytes > MAX_OUTBOUND_ATTACHMENT_BYTES) {
+        setSendStatus('Error: Total attachment size exceeds 20 MB', true);
+        return;
+      }
+    }
 
     if (files.length > 0) {
       setSendStatus('Preparing attachments...', false);

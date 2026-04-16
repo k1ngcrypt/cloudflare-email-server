@@ -1,5 +1,6 @@
 import { createMimeMessage } from 'mimetext';
 import type { Env } from './index';
+import { normalizeMimeType } from './attachment-utils';
 
 export interface SendAttachment {
   filename: string;
@@ -98,7 +99,7 @@ function buildRawMessage(opts: SendOptions, recipients: string[]): string {
   for (const attachment of opts.attachments ?? []) {
     mimeMessage.addAttachment({
       filename: attachment.filename,
-      contentType: attachment.mimeType ?? 'application/octet-stream',
+      contentType: normalizeMimeType(attachment.mimeType),
       data: attachment.content,
       encoding: 'base64',
     });

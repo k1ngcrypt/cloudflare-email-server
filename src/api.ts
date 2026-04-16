@@ -23,6 +23,7 @@ import {
   decodeBase64ToBytes,
   escapeQuotedHeaderValue,
   normalizeAttachmentContent,
+  normalizeMimeType,
   sanitizeFilename,
 } from './attachment-utils';
 import { sendEmail, type SendAttachment } from './send';
@@ -79,23 +80,23 @@ type AppBindings = {
 };
 
 const loginBodySchema = z.object({
-  username: z.string(),
-  password: z.string(),
-});
-
-const sendBodySchema = z.object({
-  from: z.string().optional(),
-  to: z.string(),
-  subject: z.string(),
-  text: z.string(),
-  html: z.string().optional(),
-  attachments: z.unknown().optional(),
+  username: z.string().trim().min(1),
+  password: z.string().min(1),
 });
 
 const sendAttachmentSchema = z.object({
   filename: z.string(),
   content: z.string(),
   mimeType: z.string().optional(),
+});
+
+const sendBodySchema = z.object({
+  from: z.string().trim().optional(),
+  to: z.string().trim().min(1),
+  subject: z.string().trim().min(1),
+  text: z.string().trim().min(1),
+  html: z.string().optional(),
+  attachments: z.array(sendAttachmentSchema).max(MAX_ATTACHMENT_COUNT).optional(),
 });
 
 const adminAliasIdentitySchema = z.object({
@@ -194,6 +195,44 @@ function requiredPayloadErrorForPath(path: string): string {
   }
 
   return 'Invalid JSON payload';
+}
+
+function normalizeNextPath(nextPath: string | null | undefined): string | null {
+  if (typeof nextPath !== 'string') {
+    return null;
+  }
+
+  const trimmed = nextPath.trim();
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//')) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+function isAdminPath(path: string): boolean {
+  return path === '/admin' || path === '/admin/index.html';
+}
+
+function resolveAuthenticatedLoginDestination(nextPath: string | null, role: UserRole): string {
+  if (!nextPath) {
+    return '/mail';
+  }
+
+  if (isAdminPath(nextPath) && role !== 'admin') {
+    return '/mail';
+  }
+
+  return nextPath;
+}
+
+function redirectToLoginWithNext(c: Context<AppBindings>, nextPath: string): Response {
+  const normalizedNext = normalizeNextPath(nextPath);
+  if (!normalizedNext) {
+    return c.redirect('/login', 302);
+  }
+
+  return c.redirect(`/login?next=${encodeURIComponent(normalizedNext)}`, 302);
 }
 
 async function resolveUserAddressSet(
@@ -841,7 +880,11 @@ app.get('/index.html', (c) => c.redirect('/login', 302));
 app.get('/login', async (c) => {
   const user = await authenticate(c.req.raw, c.env);
   if (user) {
-    return c.redirect('/mail', 302);
+    const destination = resolveAuthenticatedLoginDestination(
+      normalizeNextPath(c.req.query('next')),
+      user.role
+    );
+    return c.redirect(destination, 302);
   }
 
   return c.html(getLoginHtml());
@@ -850,7 +893,7 @@ app.get('/login', async (c) => {
 async function handleMailPage(c: Context<AppBindings>): Promise<Response> {
   const user = await authenticate(c.req.raw, c.env);
   if (!user) {
-    return c.redirect('/login', 302);
+    return redirectToLoginWithNext(c, '/mail');
   }
 
   return c.html(getWebmailHtml());
@@ -859,7 +902,7 @@ async function handleMailPage(c: Context<AppBindings>): Promise<Response> {
 async function handleAdminPage(c: Context<AppBindings>): Promise<Response> {
   const user = await authenticate(c.req.raw, c.env);
   if (!user) {
-    return c.redirect('/login', 302);
+    return redirectToLoginWithNext(c, '/admin');
   }
 
   if (user.role !== 'admin') {
@@ -886,11 +929,7 @@ api.post(
   }),
   async (c, next) => {
     const body = c.req.valid('json');
-    const username = body.username.trim();
-    if (username.length === 0) {
-      await next();
-      return;
-    }
+    const username = body.username;
 
     try {
       const throttleKey = getLoginThrottleKey(c.req.raw, username);
@@ -908,64 +947,56 @@ api.post(
     await next();
   },
   async (c) => {
-  const body = c.req.valid('json');
-  if (
-    body.password.length === 0
-  ) {
-    return c.json({ error: 'username and password are required' }, 400);
+    const body = c.req.valid('json');
+    const username = body.username;
+
+    const user = await c.env.DB.prepare(
+      `
+        SELECT users.id, users.username, users.password_hash, COALESCE(user_roles.role, 'user') AS role
+        FROM users
+        LEFT JOIN user_roles ON user_roles.user_id = users.id
+        WHERE users.username = ?
+        LIMIT 1
+      `
+    )
+      .bind(username)
+      .first<{ id: number; username: string; password_hash: string; role: string | null }>();
+
+    if (!user) {
+      return c.json({ error: 'Invalid credentials' }, 401);
+    }
+
+    const passwordOk = await verifyPassword(body.password, user.password_hash);
+    if (!passwordOk) {
+      return c.json({ error: 'Invalid credentials' }, 401);
+    }
+
+    const [session, userAddressSet] = await Promise.all([
+      createSession(c.env, user.id),
+      resolveUserAddressSet(c.env, user.id),
+    ]);
+
+    setCookie(c, getSessionCookieName(), session.token, {
+      maxAge: session.maxAgeSeconds,
+      httpOnly: true,
+      path: '/',
+      sameSite: 'Strict',
+      secure: true,
+    });
+
+    return c.json({
+      token: session.token,
+      email: userAddressSet.primaryEmail,
+      primaryName: userAddressSet.primaryName,
+      emailIdentities: userAddressSet.emailIdentities,
+      emails: userAddressSet.emails,
+      username: user.username,
+      name: userAddressSet.primaryName,
+      role: normalizeRole(user.role),
+      expiresAt: session.expiresAt,
+    });
   }
-
-  const username = body.username.trim();
-  if (!username) {
-    return c.json({ error: 'username and password are required' }, 400);
-  }
-
-  const user = await c.env.DB.prepare(
-    `
-      SELECT users.id, users.username, users.password_hash, COALESCE(user_roles.role, 'user') AS role
-      FROM users
-      LEFT JOIN user_roles ON user_roles.user_id = users.id
-      WHERE users.username = ?
-      LIMIT 1
-    `
-  )
-    .bind(username)
-    .first<{ id: number; username: string; password_hash: string; role: string | null }>();
-
-  if (!user) {
-    return c.json({ error: 'Invalid credentials' }, 401);
-  }
-
-  const passwordOk = await verifyPassword(body.password, user.password_hash);
-  if (!passwordOk) {
-    return c.json({ error: 'Invalid credentials' }, 401);
-  }
-
-  const [session, userAddressSet] = await Promise.all([
-    createSession(c.env, user.id),
-    resolveUserAddressSet(c.env, user.id),
-  ]);
-
-  setCookie(c, getSessionCookieName(), session.token, {
-    maxAge: session.maxAgeSeconds,
-    httpOnly: true,
-    path: '/',
-    sameSite: 'Strict',
-    secure: true,
-  });
-
-  return c.json({
-    token: session.token,
-    email: userAddressSet.primaryEmail,
-    primaryName: userAddressSet.primaryName,
-    emailIdentities: userAddressSet.emailIdentities,
-    emails: userAddressSet.emails,
-    username: user.username,
-    name: userAddressSet.primaryName,
-    role: normalizeRole(user.role),
-    expiresAt: session.expiresAt,
-  });
-});
+);
 
 api.post('/logout', async (c) => {
   await revokeSession(c.req.raw, c.env);
@@ -1276,84 +1307,82 @@ api.post(
   '/send',
   zValidator('json', sendBodySchema, (result, c) => {
     if (!result.success) {
+      const firstIssue = result.error.issues[0];
+      if (firstIssue) {
+        if (
+          firstIssue.path[0] === 'attachments' &&
+          firstIssue.code === 'invalid_type' &&
+          firstIssue.path.length === 1
+        ) {
+          return c.json({ error: 'attachments must be an array' }, 400);
+        }
+
+        if (firstIssue.path[0] === 'attachments' && firstIssue.code === 'too_big') {
+          return c.json({ error: `Too many attachments (max ${MAX_ATTACHMENT_COUNT})` }, 400);
+        }
+
+        if (firstIssue.path[0] === 'attachments' && typeof firstIssue.path[1] === 'number') {
+          return c.json({ error: `Invalid attachment at index ${firstIssue.path[1]}` }, 400);
+        }
+      }
+
       return c.json({ error: 'to, subject, and text are required' }, 400);
     }
   }),
   async (c) => {
-  const user = c.get('user');
-  const body = c.req.valid('json');
+    const user = c.get('user');
+    const body = c.req.valid('json');
 
-  if (!body.to || !body.subject || !body.text) {
-    return c.json({ error: 'to, subject, and text are required' }, 400);
-  }
+    const userAddressSet = await resolveUserAddressSet(c.env, user.id);
+    let fromAddress = userAddressSet.primaryEmail;
+    let fromName = userAddressSet.primaryName;
 
-  const userAddressSet = await resolveUserAddressSet(c.env, user.id);
-  let fromAddress = userAddressSet.primaryEmail;
-  let fromName = userAddressSet.primaryName;
+    if (body.from) {
+      const normalizedFrom = normalizeEmailAddress(body.from);
 
-  if (typeof body.from === 'string' && body.from.trim().length > 0) {
-    const normalizedFrom = normalizeEmailAddress(body.from);
+      if (!isValidEmailAddress(normalizedFrom)) {
+        return c.json({ error: 'from must be a valid email address' }, 400);
+      }
 
-    if (!isValidEmailAddress(normalizedFrom)) {
-      return c.json({ error: 'from must be a valid email address' }, 400);
+      if (!userAddressSet.nameByEmail.has(normalizedFrom)) {
+        return c.json({ error: 'from address is not assigned to this account' }, 403);
+      }
+
+      fromAddress = normalizedFrom;
+      fromName = userAddressSet.nameByEmail.get(normalizedFrom) ?? userAddressSet.primaryName;
     }
 
-    if (!userAddressSet.nameByEmail.has(normalizedFrom)) {
-      return c.json({ error: 'from address is not assigned to this account' }, 403);
+    const incomingAttachments = body.attachments ?? [];
+    const preparedAttachments: PreparedSendAttachment[] = [];
+    let totalAttachmentBytes = 0;
+
+    for (let i = 0; i < incomingAttachments.length; i += 1) {
+      const attachment = incomingAttachments[i];
+      const filename = sanitizeFilename(attachment.filename);
+      const normalizedContent = normalizeAttachmentContent(attachment.content);
+      if (!normalizedContent) {
+        return c.json({ error: `Attachment ${filename} has no content` }, 400);
+      }
+
+      let bytes: Uint8Array;
+      try {
+        bytes = decodeBase64ToBytes(normalizedContent);
+      } catch {
+        return c.json({ error: `Attachment ${filename} has invalid base64 content` }, 400);
+      }
+
+      totalAttachmentBytes += bytes.byteLength;
+      if (totalAttachmentBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+        return c.json({ error: `Total attachment size exceeds ${MAX_TOTAL_ATTACHMENT_BYTES} bytes` }, 400);
+      }
+
+      preparedAttachments.push({
+        filename,
+        content: normalizedContent,
+        mimeType: normalizeMimeType(attachment.mimeType),
+        bytes,
+      });
     }
-
-    fromAddress = normalizedFrom;
-    fromName = userAddressSet.nameByEmail.get(normalizedFrom) ?? userAddressSet.primaryName;
-  }
-
-  if (body.attachments !== undefined && !Array.isArray(body.attachments)) {
-    return c.json({ error: 'attachments must be an array' }, 400);
-  }
-
-  const incomingAttachments = body.attachments ?? [];
-  if (incomingAttachments.length > MAX_ATTACHMENT_COUNT) {
-    return c.json({ error: `Too many attachments (max ${MAX_ATTACHMENT_COUNT})` }, 400);
-  }
-
-  const preparedAttachments: PreparedSendAttachment[] = [];
-  let totalAttachmentBytes = 0;
-
-  for (let i = 0; i < incomingAttachments.length; i += 1) {
-    const parsedAttachment = sendAttachmentSchema.safeParse(incomingAttachments[i]);
-    if (!parsedAttachment.success) {
-      return c.json({ error: `Invalid attachment at index ${i}` }, 400);
-    }
-
-    const attachment = parsedAttachment.data;
-
-    const filename = sanitizeFilename(attachment.filename);
-    const normalizedContent = normalizeAttachmentContent(attachment.content);
-    if (!normalizedContent) {
-      return c.json({ error: `Attachment ${filename} has no content` }, 400);
-    }
-
-    let bytes: Uint8Array;
-    try {
-      bytes = decodeBase64ToBytes(normalizedContent);
-    } catch {
-      return c.json({ error: `Attachment ${filename} has invalid base64 content` }, 400);
-    }
-
-    totalAttachmentBytes += bytes.byteLength;
-    if (totalAttachmentBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-      return c.json({ error: `Total attachment size exceeds ${MAX_TOTAL_ATTACHMENT_BYTES} bytes` }, 400);
-    }
-
-    preparedAttachments.push({
-      filename,
-      content: normalizedContent,
-      mimeType:
-        typeof attachment.mimeType === 'string' && attachment.mimeType.trim().length > 0
-          ? attachment.mimeType
-          : 'application/octet-stream',
-      bytes,
-    });
-  }
 
   let sentEmailId: number | null = null;
   const uploadedAttachmentKeys: string[] = [];
@@ -1379,7 +1408,7 @@ api.post(
       const storageKey = buildSentAttachmentStorageKey(user.id, sentEmailId, attachment.filename);
 
       await c.env.ATTACHMENTS.put(storageKey, attachment.bytes, {
-        httpMetadata: { contentType: attachment.mimeType ?? 'application/octet-stream' },
+        httpMetadata: { contentType: normalizeMimeType(attachment.mimeType) },
       });
 
       uploadedAttachmentKeys.push(storageKey);
@@ -1396,7 +1425,7 @@ api.post(
           sentEmailId,
           storageKey,
           attachment.filename,
-          attachment.mimeType ?? null,
+          normalizeMimeType(attachment.mimeType),
           attachment.bytes.byteLength
         )
         .run();

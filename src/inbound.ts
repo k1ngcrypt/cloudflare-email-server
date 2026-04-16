@@ -1,6 +1,6 @@
 import PostalMime from 'postal-mime';
 import type { Env } from './index';
-import { sanitizeFilename } from './attachment-utils';
+import { normalizeMimeType, sanitizeFilename } from './attachment-utils';
 import { findUserIdByEmailAddress, normalizeEmailAddress } from './user-addresses';
 
 const MAX_INBOUND_ATTACHMENT_COUNT = 25;
@@ -114,10 +114,7 @@ export async function handleIncomingEmail(
           ? attachment.filename
           : `attachment-${i + 1}`;
       const filename = sanitizeFilename(originalFilename);
-      const mimeType =
-        typeof attachment.mimeType === 'string' && attachment.mimeType.trim().length > 0
-          ? attachment.mimeType
-          : 'application/octet-stream';
+      const mimeType = normalizeMimeType(attachment.mimeType);
       const storageKey = buildStorageKey(userId, emailId, filename);
 
       await env.ATTACHMENTS.put(storageKey, content, {

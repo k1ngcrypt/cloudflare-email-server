@@ -24,6 +24,15 @@ export function decodeBase64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+export function normalizeMimeType(mimeType: unknown): string {
+  if (typeof mimeType !== 'string') {
+    return 'application/octet-stream';
+  }
+
+  const trimmed = mimeType.trim();
+  return trimmed.length > 0 ? trimmed : 'application/octet-stream';
+}
+
 export function escapeQuotedHeaderValue(value: string): string {
   return value.replace(/["\\\r\n]/g, '_');
 }
