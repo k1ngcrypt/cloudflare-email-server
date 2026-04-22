@@ -28,6 +28,7 @@ import {
 } from './attachment-utils';
 import { sendEmail, type SendAttachment } from './send';
 import {
+  findUserIdByEmailAddress,
   isValidEmailAddress,
   listUserEmailIdentities,
   normalizeEmailAddress,
@@ -44,6 +45,12 @@ const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const CORS_ALLOW_HEADERS = ['Content-Type', 'Authorization', 'Idempotency-Key'];
 const CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
 const LOGIN_RATE_LIMIT_PERIOD_SECONDS = 60;
+const CONTACT_ME_DESTINATION_ADDRESS = 'hpark1@k1ngcrypt.com';
+const CONTACT_ME_MAX_NAME_LENGTH = 160;
+const CONTACT_ME_MAX_EMAIL_LENGTH = 320;
+const CONTACT_ME_MAX_BODY_LENGTH = 10_000;
+const HOSTILE_CONTROL_CHAR_PATTERN =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 interface AttachmentSummary {
   id: number;
@@ -97,6 +104,12 @@ const sendBodySchema = z.object({
   text: z.string().trim().min(1),
   html: z.string().optional(),
   attachments: z.array(sendAttachmentSchema).max(MAX_ATTACHMENT_COUNT).optional(),
+});
+
+const contactMeBodySchema = z.object({
+  name: z.string().min(1).max(CONTACT_ME_MAX_NAME_LENGTH * 2),
+  email: z.string().min(3).max(CONTACT_ME_MAX_EMAIL_LENGTH * 2),
+  body: z.string().min(1).max(CONTACT_ME_MAX_BODY_LENGTH * 2),
 });
 
 const adminAliasIdentitySchema = z.object({
@@ -190,6 +203,10 @@ function requiredPayloadErrorForPath(path: string): string {
     return 'username and password are required';
   }
 
+  if (path === '/api/contactme') {
+    return 'name, email, and body are required';
+  }
+
   if (path === '/api/send') {
     return 'to, subject, and text are required';
   }
@@ -208,6 +225,86 @@ function normalizeNextPath(nextPath: string | null | undefined): string | null {
   }
 
   return trimmed;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      case "'":
+        return '&#39;';
+      default:
+        return char;
+    }
+  });
+}
+
+function sanitizeSingleLineHostileInput(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/\r\n?|\n/g, ' ')
+    .replace(HOSTILE_CONTROL_CHAR_PATTERN, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeMultilineHostileInput(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/\r\n?/g, '\n')
+    .replace(HOSTILE_CONTROL_CHAR_PATTERN, '')
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+type SanitizedContactMePayload = {
+  name: string;
+  email: string;
+  body: string;
+};
+
+function sanitizeContactMePayload(payload: z.infer<typeof contactMeBodySchema>): SanitizedContactMePayload {
+  const sanitizedName = escapeHtml(sanitizeSingleLineHostileInput(payload.name));
+  const normalizedEmail = normalizeEmailAddress(sanitizeSingleLineHostileInput(payload.email));
+  const sanitizedBody = escapeHtml(sanitizeMultilineHostileInput(payload.body));
+
+  if (!sanitizedName) {
+    throw new Error('name is required');
+  }
+
+  if (sanitizedName.length > CONTACT_ME_MAX_NAME_LENGTH) {
+    throw new Error(`name must be ${CONTACT_ME_MAX_NAME_LENGTH} characters or fewer`);
+  }
+
+  if (!normalizedEmail || normalizedEmail.length > CONTACT_ME_MAX_EMAIL_LENGTH) {
+    throw new Error('email must be a valid email address');
+  }
+
+  if (!isValidEmailAddress(normalizedEmail)) {
+    throw new Error('email must be a valid email address');
+  }
+
+  if (!sanitizedBody) {
+    throw new Error('body is required');
+  }
+
+  if (sanitizedBody.length > CONTACT_ME_MAX_BODY_LENGTH) {
+    throw new Error(`body must be ${CONTACT_ME_MAX_BODY_LENGTH} characters or fewer`);
+  }
+
+  return {
+    name: sanitizedName,
+    email: normalizedEmail,
+    body: sanitizedBody,
+  };
 }
 
 function isAdminPath(path: string): boolean {
@@ -1009,6 +1106,66 @@ api.post('/logout', async (c) => {
   });
   return c.json({ ok: true });
 });
+
+api.post(
+  '/contactme',
+  zValidator('json', contactMeBodySchema, (result, c) => {
+    if (!result.success) {
+      return c.json({ error: 'name, email, and body are required' }, 400);
+    }
+  }),
+  async (c) => {
+    let sanitized: SanitizedContactMePayload;
+
+    try {
+      sanitized = sanitizeContactMePayload(c.req.valid('json'));
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : 'Invalid contact payload' }, 400);
+    }
+
+    const destinationUserId = await findUserIdByEmailAddress(c.env, CONTACT_ME_DESTINATION_ADDRESS);
+    if (!destinationUserId) {
+      console.error(
+        `Contact endpoint destination mailbox is not configured for ${CONTACT_ME_DESTINATION_ADDRESS}`
+      );
+      return c.json({ error: 'Contact inbox unavailable' }, 503);
+    }
+
+    const messageBody = [
+      'Contact form submission',
+      `Name: ${sanitized.name}`,
+      `Email: ${sanitized.email}`,
+      '',
+      sanitized.body,
+    ].join('\n');
+
+    const messageId = `<contactme-${crypto.randomUUID()}@webmail.local>`;
+    const subject = `Contact request from ${sanitized.name}`;
+    const rawSize = new TextEncoder().encode(messageBody).byteLength;
+
+    await c.env.DB.prepare(
+      `
+        INSERT INTO emails
+          (user_id, message_id, from_address, from_name, to_address,
+           subject, body_text, body_html, raw_size, folder)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'inbox')
+      `
+    )
+      .bind(
+        destinationUserId,
+        messageId,
+        sanitized.email,
+        sanitized.name,
+        CONTACT_ME_DESTINATION_ADDRESS,
+        subject,
+        messageBody,
+        rawSize
+      )
+      .run();
+
+    return c.json({ ok: true });
+  }
+);
 
 const requireAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
   const user = await authenticate(c.req.raw, c.env);

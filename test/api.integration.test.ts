@@ -147,6 +147,70 @@ describe('worker HTTP API integration', () => {
     expect(body.error).toBe('Unauthorized');
   });
 
+  it('accepts unauthenticated contact submissions and stores sanitized email rows', async () => {
+    const destinationUser = await seedUser({
+      username: 'contact-destination',
+      name: 'Contact Destination',
+      email: 'hpark1@k1ngcrypt.com',
+      password: 'Contact-Destination-Pass-123',
+    });
+
+    const response = await apiRequest('/api/contactme', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: '  <img src=x onerror=alert(1)>\u0000  ',
+        email: '  Contact.User+test@Example.com  ',
+        body: '\u0000Hello<script>alert(1)</script>\r\n\r\nRegards,\u202E attacker',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect((await readJson<{ ok: boolean }>(response)).ok).toBe(true);
+
+    const stored = await bindings()
+      .DB.prepare(
+        `
+          SELECT user_id, from_address, from_name, to_address, subject, body_text, folder, read
+          FROM emails
+          WHERE user_id = ?
+          ORDER BY id DESC
+          LIMIT 1
+        `
+      )
+      .bind(destinationUser.id)
+      .first<{
+        user_id: number;
+        from_address: string;
+        from_name: string;
+        to_address: string;
+        subject: string;
+        body_text: string;
+        folder: string;
+        read: number;
+      }>();
+
+    expect(stored).toBeTruthy();
+    expect(stored?.user_id).toBe(destinationUser.id);
+    expect(stored?.to_address).toBe('hpark1@k1ngcrypt.com');
+    expect(stored?.from_address).toBe('contact.user+test@example.com');
+    expect(stored?.from_name).toBe('&lt;img src=x onerror=alert(1)&gt;');
+    expect(stored?.subject).toBe('Contact request from &lt;img src=x onerror=alert(1)&gt;');
+    expect(stored?.folder).toBe('inbox');
+    expect(stored?.read).toBe(0);
+
+    expect(stored?.body_text).toContain('Contact form submission');
+    expect(stored?.body_text).toContain('Name: &lt;img src=x onerror=alert(1)&gt;');
+    expect(stored?.body_text).toContain('Email: contact.user+test@example.com');
+    expect(stored?.body_text).toContain('Hello&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(stored?.body_text).toContain('Regards, attacker');
+    expect(stored?.body_text).not.toContain('\u0000');
+    expect(stored?.body_text).not.toContain('\u202e');
+    expect(stored?.body_text).not.toContain('\r');
+  });
+
   it('validates malformed and incomplete login payloads', async () => {
     const malformedJson = await apiRequest('/api/login', {
       method: 'POST',
