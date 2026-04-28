@@ -28,6 +28,7 @@ import {
 } from './attachment-utils';
 import { sendEmail, type SendAttachment } from './send';
 import {
+  findUserIdByEmailAddress,
   isValidEmailAddress,
   listUserEmailIdentities,
   normalizeEmailAddress,
@@ -97,6 +98,13 @@ const sendBodySchema = z.object({
   text: z.string().trim().min(1),
   html: z.string().optional(),
   attachments: z.array(sendAttachmentSchema).max(MAX_ATTACHMENT_COUNT).optional(),
+});
+
+const contactMeRecipientEmail = 'hpark1@k1ngcrypt.com';
+const contactMeBodySchema = z.object({
+  name: z.string().trim().min(3, 'Name must be at least 3 characters.').max(100),
+  email: z.string().trim().min(3).max(254).email('Enter a valid email address.'),
+  message: z.string().trim().min(5, 'Message must be at least 5 characters.').max(5000),
 });
 
 const adminAliasIdentitySchema = z.object({
@@ -194,7 +202,46 @@ function requiredPayloadErrorForPath(path: string): string {
     return 'to, subject, and text are required';
   }
 
+  if (path === '/contactme') {
+    return 'Invalid contact payload';
+  }
+
   return 'Invalid JSON payload';
+}
+
+function buildFieldErrorMap(issues: z.ZodIssue[]): Record<string, string> {
+  const fields: Record<string, string> = {};
+
+  for (const issue of issues) {
+    const fieldName = typeof issue.path[0] === 'string' ? issue.path[0] : null;
+    if (!fieldName || fields[fieldName]) {
+      continue;
+    }
+
+    fields[fieldName] = issue.message;
+  }
+
+  return fields;
+}
+
+function contactMeError(
+  c: Context,
+  status: 202 | 400 | 403 | 404 | 422 | 429 | 500 | 502 | 503,
+  code: string,
+  message: string,
+  fields?: Record<string, string>
+): Response {
+  return c.json(
+    {
+      ok: false,
+      error: message,
+      details: {
+        code,
+        ...(fields && Object.keys(fields).length > 0 ? { fields } : {}),
+      },
+    },
+    { status }
+  );
 }
 
 function normalizeNextPath(nextPath: string | null | undefined): string | null {
@@ -917,6 +964,74 @@ app.get('/mail/index.html', handleMailPage);
 app.get('/admin', handleAdminPage);
 app.get('/admin/index.html', handleAdminPage);
 app.get('/favicon.ico', (c) => c.body(null, 204));
+
+app.post(
+  '/contactme',
+  zValidator('json', contactMeBodySchema, (result, c) => {
+    if (!result.success) {
+      return contactMeError(
+        c,
+        422,
+        'VALIDATION_ERROR',
+        'One or more fields are invalid.',
+        buildFieldErrorMap(result.error.issues)
+      );
+    }
+  }),
+  async (c) => {
+    const allowedOrigin = resolveAllowedOrigin(c.req.raw, c.env);
+    if (!allowedOrigin) {
+      return contactMeError(c, 403, 'FORBIDDEN', 'Origin not allowed.');
+    }
+
+    const recipientUserId = await findUserIdByEmailAddress(c.env, contactMeRecipientEmail);
+    if (!recipientUserId) {
+      return contactMeError(
+        c,
+        503,
+        'RECIPIENT_NOT_CONFIGURED',
+        'Contact recipient is not configured.'
+      );
+    }
+
+    const body = c.req.valid('json');
+    const subject = 'Contact form submission';
+    const bodyText = body.message.trim();
+    const bodySize = new TextEncoder().encode(bodyText).byteLength;
+
+    const inserted = await c.env.DB.prepare(
+      `
+        INSERT INTO emails
+          (user_id, from_address, from_name, to_address, subject, body_text, body_html, raw_size, folder)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'inbox')
+        RETURNING id
+      `
+    )
+      .bind(
+        recipientUserId,
+        normalizeEmailAddress(body.email),
+        body.name.trim(),
+        contactMeRecipientEmail,
+        subject,
+        bodyText,
+        bodySize
+      )
+      .first<{ id: number }>();
+
+    if (!inserted) {
+      throw new Error('Failed to store contact message');
+    }
+
+    return c.json(
+      {
+        ok: true,
+        requestId: inserted.id,
+        recipient: contactMeRecipientEmail,
+      },
+      202
+    );
+  }
+);
 
 const api = new Hono<AppBindings>();
 

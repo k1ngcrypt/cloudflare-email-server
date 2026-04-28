@@ -23,6 +23,129 @@ describe('worker HTTP API integration', () => {
     await resetState();
   });
 
+  it('accepts contact submissions for the fixed recipient and stores them in D1', async () => {
+    const recipient = await seedUser({
+      username: 'contact-recipient',
+      email: 'hpark1@k1ngcrypt.com',
+      password: 'Contact-Recipient-Password-123',
+    });
+
+    const response = await apiRequest('/contactme', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://portfolio.k1ngcrypt.com',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Ada Lovelace',
+        email: 'ADA@EXAMPLE.NET',
+        message: 'Hello from the contact form.',
+      }),
+    });
+
+    expect(response.status).toBe(202);
+    const body = await readJson<{
+      ok: boolean;
+      requestId: number;
+      recipient: string;
+    }>(response);
+    expect(body.ok).toBe(true);
+    expect(body.recipient).toBe('hpark1@k1ngcrypt.com');
+    expect(body.requestId).toBeGreaterThan(0);
+
+    const stored = await bindings()
+      .DB.prepare(
+        `
+          SELECT user_id, from_address, from_name, to_address, subject, body_text, folder
+          FROM emails
+          WHERE user_id = ?
+          ORDER BY id DESC
+          LIMIT 1
+        `
+      )
+      .bind(recipient.id)
+      .first<{
+        user_id: number;
+        from_address: string;
+        from_name: string | null;
+        to_address: string;
+        subject: string;
+        body_text: string | null;
+        folder: string;
+      }>();
+
+    expect(stored).toBeTruthy();
+    expect(stored?.user_id).toBe(recipient.id);
+    expect(stored?.from_address).toBe('ada@example.net');
+    expect(stored?.from_name).toBe('Ada Lovelace');
+    expect(stored?.to_address).toBe('hpark1@k1ngcrypt.com');
+    expect(stored?.subject).toBe('Contact form submission');
+    expect(stored?.body_text).toBe('Hello from the contact form.');
+    expect(stored?.folder).toBe('inbox');
+  });
+
+  it('rejects invalid contactme requests before storing mail', async () => {
+    await seedUser({
+      username: 'contact-recipient-invalid',
+      email: 'hpark1@k1ngcrypt.com',
+      password: 'Contact-Recipient-Password-123',
+    });
+
+    const invalidOrigin = await apiRequest('/contactme', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://attacker.example',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Ada Lovelace',
+        email: 'ada@example.net',
+        message: 'Hello from the contact form.',
+      }),
+    });
+
+    expect(invalidOrigin.status).toBe(403);
+    expect((await readJson<{ error: string }>(invalidOrigin)).error).toContain('Origin not allowed');
+
+    const trustedPreflight = await apiRequest('/contactme', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://portfolio.k1ngcrypt.com',
+        'Access-Control-Request-Method': 'POST',
+      },
+    });
+
+    expect(trustedPreflight.status).toBe(204);
+    expect(trustedPreflight.headers.get('access-control-allow-origin')).toBe(
+      'https://portfolio.k1ngcrypt.com'
+    );
+
+    const invalidBody = await apiRequest('/contactme', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://portfolio.k1ngcrypt.com',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'A',
+        email: 'not-an-email',
+        message: 'Hi',
+      }),
+    });
+
+    expect(invalidBody.status).toBe(422);
+    const invalidBodyJson = await readJson<{
+      ok: boolean;
+      error: string;
+      details: { code: string; fields: Record<string, string> };
+    }>(invalidBody);
+    expect(invalidBodyJson.ok).toBe(false);
+    expect(invalidBodyJson.details.code).toBe('VALIDATION_ERROR');
+    expect(invalidBodyJson.details.fields.name).toContain('3 characters');
+    expect(invalidBodyJson.details.fields.email).toContain('valid email address');
+    expect(invalidBodyJson.details.fields.message).toContain('5 characters');
+  });
+
   it('responds to CORS preflight for trusted origins and withholds headers for untrusted origins', async () => {
     const trusted = await apiRequest('/api/me', {
       method: 'OPTIONS',
