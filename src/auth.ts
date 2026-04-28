@@ -1,3 +1,4 @@
+import { bytesToBase64, bytesToHex } from './crypto-utils';
 import type { Env } from './index';
 
 const TOKEN_COOKIE_NAME = 'session_token';
@@ -8,7 +9,7 @@ const textEncoder = new TextEncoder();
 let cachedAuthSecret: string | null = null;
 let cachedAuthSecretKeyPromise: Promise<CryptoKey> | null = null;
 
-export interface SessionInfo {
+interface SessionInfo {
   token: string;
   expiresAt: string;
   maxAgeSeconds: number;
@@ -34,20 +35,6 @@ function getSessionSigningKey(authSecret: string): Promise<CryptoKey> {
   });
 
   return cachedAuthSecretKeyPromise;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {

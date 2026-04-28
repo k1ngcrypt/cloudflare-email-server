@@ -1,3 +1,9 @@
+import {
+  bytesToBase64,
+  createCachedRsaSigningKeyImporter,
+  normalizePemPrivateKey,
+  sha256Base64,
+} from './crypto-utils';
 import type { Env } from './index';
 
 const OCI_CONTROL_API_VERSION_PATH = '/20170907';
@@ -44,8 +50,9 @@ export class ApprovedSenderSyncError extends Error {
 }
 
 const textEncoder = new TextEncoder();
-let cachedSigningKeyPem: string | null = null;
-let cachedSigningKeyPromise: Promise<CryptoKey> | null = null;
+const getOciSigningKey = createCachedRsaSigningKeyImporter({
+  invalidRsaMessage: 'OCI_EMAIL_API_PRIVATE_KEY must use PKCS#8 format (BEGIN PRIVATE KEY).',
+});
 let cachedNormalizedPrivateKeyRaw: string | null = null;
 let cachedNormalizedPrivateKey: string | null = null;
 let cachedKeyIdParts: string | null = null;
@@ -72,23 +79,6 @@ function normalizeUniqueEmailAddresses(emailAddresses: string[]): string[] {
   return uniqueAddresses;
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function normalizePemPrivateKey(input: string): string {
-  const trimmed = input.trim();
-  if (trimmed.includes('\\n')) {
-    return trimmed.replace(/\\n/g, '\n');
-  }
-
-  return trimmed;
-}
-
 function getNormalizedPemPrivateKey(input: string): string {
   if (cachedNormalizedPrivateKeyRaw === input && cachedNormalizedPrivateKey !== null) {
     return cachedNormalizedPrivateKey;
@@ -112,58 +102,6 @@ function getOciKeyId(env: Env): string {
   return keyId;
 }
 
-function pemToDerBytes(privateKeyPem: string): Uint8Array {
-  const normalized = privateKeyPem.trim();
-
-  if (normalized.includes('BEGIN RSA PRIVATE KEY')) {
-    throw new Error(
-      'OCI_EMAIL_API_PRIVATE_KEY must use PKCS#8 format (BEGIN PRIVATE KEY).'
-    );
-  }
-
-  const body = normalized
-    .replace('-----BEGIN PRIVATE KEY-----', '')
-    .replace('-----END PRIVATE KEY-----', '')
-    .replace(/\s+/g, '');
-
-  const binary = atob(body);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
-  return bytes;
-}
-
-async function sha256Base64(content: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', content as unknown as BufferSource);
-  return bytesToBase64(new Uint8Array(digest));
-}
-
-function getOciSigningKey(privateKeyPem: string): Promise<CryptoKey> {
-  if (cachedSigningKeyPromise && cachedSigningKeyPem === privateKeyPem) {
-    return cachedSigningKeyPromise;
-  }
-
-  cachedSigningKeyPem = privateKeyPem;
-  cachedSigningKeyPromise = crypto.subtle.importKey(
-    'pkcs8',
-    pemToDerBytes(privateKeyPem) as unknown as BufferSource,
-    {
-      name: 'RSASSA-PKCS1-v1_5',
-      hash: 'SHA-256',
-    },
-    false,
-    ['sign']
-  );
-
-  cachedSigningKeyPromise.catch(() => {
-    cachedSigningKeyPem = null;
-    cachedSigningKeyPromise = null;
-  });
-
-  return cachedSigningKeyPromise;
-}
 
 async function signOciRequest(signingString: string, privateKeyPem: string): Promise<string> {
   const key = await getOciSigningKey(privateKeyPem);
