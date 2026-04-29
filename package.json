@@ -1,6 +1,7 @@
 {
   "name": "cloudflare-webmail",
   "version": "0.1.0",
+  "packageManager": "pnpm@10.33.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,16 +15,16 @@
   },
   "dependencies": {
     "@hono/zod-validator": "^0.7.6",
-    "hono": "^4.12.10",
-    "mimetext": "^3.0.23",
-    "postal-mime": "^2.4.4",
+    "hono": "^4.12.15",
+    "mimetext": "^3.0.28",
+    "postal-mime": "^2.7.4",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.14.1",
-    "@cloudflare/workers-types": "^4.20260307.0",
-    "typescript": "^5.8.3",
-    "vitest": "^4.1.2",
-    "wrangler": "^4.81.0"
+    "@cloudflare/vitest-pool-workers": "^0.15.1",
+    "@cloudflare/workers-types": "^4.20260426.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5",
+    "wrangler": "^4.86.0"
   }
 }

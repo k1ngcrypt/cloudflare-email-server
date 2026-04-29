@@ -40,11 +40,11 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 
 ## Setup
 
-1. Install dependencies: `npm install`
+1. Install dependencies: `pnpm install`
 2. Create D1 DB and update `wrangler.toml` with your `database_id`.
 3. Create an R2 bucket for attachments and keep the bucket name aligned with `wrangler.toml` (`webmail-attachments` by default).
 4. Configure the `LOGIN_RATE_LIMITER` binding namespace IDs in `wrangler.toml` and `wrangler.test.toml` for your account.
-5. Apply `schema.sql`: `npm run db:migrate` or `wrangler d1 execute webmail-db --file=./schema.sql`
+5. Apply `schema.sql`: `pnpm run db:migrate` or `wrangler d1 execute webmail-db --file=./schema.sql`
       - For production D1, run: `wrangler d1 execute webmail-db --remote --file=./schema.sql`
 6. Set secrets with Wrangler:
       - `OCI_EMAIL_API_TENANCY_OCID`
@@ -66,7 +66,7 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 - Address records in `user_addresses` include a required display name; outbound mail uses the selected address's display name for MIME `From`.
 - API sessions are set as `HttpOnly` secure cookies and can also be used as bearer tokens for non-browser clients.
 - Login attempts are rate limited per `client-ip + username` key using the Cloudflare `LOGIN_RATE_LIMITER` binding in `wrangler.toml`.
-- Running `npm run db:migrate` on existing deployments removes legacy `login_attempts` table/index artifacts.
+- Running `pnpm run db:migrate` on existing deployments removes legacy `login_attempts` table/index artifacts.
 - Outbound email is sent with OCI Email Delivery Submission HTTPS API over TLS on port 443 and signed with OCI Signature Version 1.
 - Admin user CRUD also synchronizes OCI Email Delivery approved senders through the control-plane Sender APIs (`listSenders`, `createSender`, `deleteSender`).
 
@@ -93,11 +93,11 @@ Everything lives in **one Cloudflare Worker** with two exported handlers:
 
 ## Commands
 
-- `npm run dev` (run local server)
-- `npm run typecheck` (verify types)
-- `npm run deploy` (deploy to CF)
-- `npm run db:create` (create DB)
-- `npm run db:migrate` (migrate DB schema)
+- `pnpm dev` (run local server)
+- `pnpm typecheck` (verify types)
+- `pnpm deploy` (deploy to CF)
+- `pnpm db:create` (create DB)
+- `pnpm db:migrate` (migrate DB schema)
 
 ## Managing Account Addresses
 
