@@ -18,7 +18,7 @@
     "hono": "^4.12.15",
     "mimetext": "^3.0.28",
     "postal-mime": "^2.7.4",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.15.1",
