@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@hono/zod-validator": "^0.8.0",
-    "hono": "^4.12.18",
+    "hono": "^4.12.21",
     "mimetext": "^3.0.28",
     "postal-mime": "^2.7.4",
     "zod": "^4.4.3"
